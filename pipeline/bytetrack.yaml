@@ -1,0 +1,22 @@
+# ByteTrack settings tuned for this fixed-camera highway scene.
+#
+# Rationale vs the Ultralytics defaults (track_buffer 30, new_track_thresh 0.25):
+#   * track_buffer 30 frames = 1.2 s at 25 fps. Vehicles here are occluded by the
+#     truck and by each other for longer than that, so a lost track was being
+#     retired and the same car came back with a fresh id. Raised to 75 (3 s).
+#   * new_track_thresh raised so a weak, flickering detection does not spawn a
+#     brand-new id that then has to be stitched back.
+#   * match_thresh raised slightly (cost = 1 - IoU, so a HIGHER value is more
+#     permissive) because vehicles receding from this camera shrink quickly and
+#     frame-to-frame IoU drops.
+#
+# This alone does not guarantee stable ids across long gaps — pipeline/reid.py
+# adds a re-identification layer on top. See docs/methodology.md.
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.30
+track_buffer: 75
+match_thresh: 0.85
+fuse_score: True

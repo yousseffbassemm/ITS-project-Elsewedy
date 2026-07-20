@@ -1,0 +1,14 @@
+# Core CV pipeline
+ultralytics>=8.3.0        # YOLO detection + built-in ByteTrack tracking
+opencv-python>=4.10.0     # video I/O, drawing, perspective transform
+supervision>=0.25.0       # Detections container + annotators (counting is hand-rolled)
+numpy>=1.26,<3
+
+# ffmpeg binary (H.264 encode for browser-playable MP4) without a system install
+imageio-ffmpeg>=0.5.1
+
+# Web backend
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9   # multipart form upload
+python-dotenv>=1.0        # loads .env (see .env.example)

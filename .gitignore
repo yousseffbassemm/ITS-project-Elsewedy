@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Data & model artifacts
+data/jobs/*
+*.tmp
+!data/jobs/.gitkeep
+
+# Harvested training crops. These are frames of real CCTV with LEGIBLE LICENCE
+# PLATES — personal data. They must not be published, even to a private repo.
+# Share them with annotators over an approved internal channel instead.
+data/dataset/
+# YOLO weights live in the project root (Ultralytics downloads them there) as
+# well as models/ — both must be ignored, they are ~30 MB.
+*.pt
+models/*.pt
+samples/*.mp4
+*.log

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ITS Traffic Analytics — Elsewedy Electric</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23ffffff'/%3E%3Cpath d='M3 17h2l2-5h10l2 5h2' fill='none' stroke='%2314161a' stroke-width='2' stroke-linecap='round'/%3E%3Cpath d='M4 21c4-3 12-3 16 0' fill='none' stroke='%23e30613' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/theme.css?v=__V__" />
+</head>
+<body>
+  <div class="topbar">
+    <div class="brandbar">
+      <img class="logo" src="/static/logo.png" alt="Elsewedy Electric" />
+      <div class="divider"></div>
+      <div class="product">ITS Traffic Analytics<small>AI Department</small></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="tag">Intelligent Transportation Systems</div>
+  </div>
+
+  <div class="wrap">
+    <!-- STEP 1: upload -->
+    <section id="uploadStep">
+      <div class="hero">
+        <h1>Turn a street video into <span class="accent">traffic intelligence</span></h1>
+        <p>Upload a video of any Egyptian street. The engine detects and counts vehicles,
+           estimates their speed, and maps congestion over time — then presents it on a live dashboard.</p>
+        <div class="pills">
+          <span class="pill"><b>Detection</b> &amp; counting</span>
+          <span class="pill"><b>Speed</b> estimation</span>
+          <span class="pill"><b>Congestion</b> analysis</span>
+          <span class="pill">YOLO + ByteTrack</span>
+        </div>
+      </div>
+
+      <div class="dropzone" id="dropzone">
+        <div class="icon">🎬</div>
+        <h3>Drop a street video here</h3>
+        <p>or <span class="browse">browse your files</span> — MP4, MOV, AVI, MKV, WEBM</p>
+        <input type="file" id="fileInput" accept="video/*" class="hidden" />
+      </div>
+      <div style="text-align:center; margin-top:20px;">
+        <button class="btn" id="startBtn" disabled>Analyze video →</button>
+        <div id="fileName" class="tag" style="margin-top:10px;"></div>
+      </div>
+    </section>
+
+    <!-- STEP 2: processing -->
+    <section id="processStep" class="processing hidden">
+      <div class="spinner"></div>
+      <div class="pct" id="pct">0%</div>
+      <div class="bar"><span id="barFill"></span></div>
+      <div class="status-msg" id="statusMsg">Uploading…</div>
+      <p class="tag" style="margin-top:22px;">Processing runs on CPU, so longer clips take a few minutes.
+         You can keep this tab open.</p>
+    </section>
+  </div>
+
+  <div class="footer">© Elsewedy Electric — AI Department · Intelligent Transportation Systems prototype</div>
+
+  <script>
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const startBtn = document.getElementById('startBtn');
+    const fileNameEl = document.getElementById('fileName');
+    let chosen = null;
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag'); });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+    dropzone.addEventListener('drop', e => {
+      e.preventDefault(); dropzone.classList.remove('drag');
+      if (e.dataTransfer.files.length) selectFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => { if (fileInput.files.length) selectFile(fileInput.files[0]); });
+
+    function selectFile(f) {
+      chosen = f;
+      fileNameEl.textContent = f.name + '  ·  ' + (f.size / 1024 / 1024).toFixed(1) + ' MB';
+      startBtn.disabled = false;
+    }
+
+    startBtn.addEventListener('click', upload);
+
+    async function upload() {
+      if (!chosen) return;
+      document.getElementById('uploadStep').classList.add('hidden');
+      document.getElementById('processStep').classList.remove('hidden');
+      setStatus('Uploading video…', 0);
+
+      const fd = new FormData();
+      fd.append('file', chosen);
+      let res;
+      try {
+        res = await fetch('/api/upload', { method: 'POST', body: fd });
+      } catch (e) { return setStatus('Upload failed: ' + e, 0); }
+      if (!res.ok) { return setStatus('Upload rejected: ' + (await res.text()), 0); }
+      const { job_id } = await res.json();
+      poll(job_id);
+    }
+
+    function poll(jobId) {
+      const timer = setInterval(async () => {
+        let s;
+        try { s = await (await fetch('/api/status/' + jobId)).json(); }
+        catch (e) { return; }
+        setStatus(prettyMsg(s), s.progress || 0);
+        if (s.status === 'done') { clearInterval(timer); location.href = '/results?job=' + jobId; }
+        if (s.status === 'error') { clearInterval(timer); setStatus('❌ ' + (s.error || 'processing failed'), s.progress); }
+      }, 1200);
+    }
+
+    function prettyMsg(s) {
+      if (s.status === 'queued') return 'Queued…';
+      if (s.status === 'processing') return s.message || 'Processing…';
+      if (s.status === 'done') return 'Done — opening dashboard…';
+      return s.message || s.status;
+    }
+
+    function setStatus(msg, pct) {
+      document.getElementById('statusMsg').textContent = msg;
+      document.getElementById('pct').textContent = Math.round(pct) + '%';
+      document.getElementById('barFill').style.width = Math.max(2, pct) + '%';
+    }
+  </script>
+</body>
+</html>
