@@ -494,6 +494,12 @@ def test_washed_out_band_is_still_read() -> None:
     check("washed-out red band reads as red",
           classify_band(169, 57, 120, s_body=16, v_body=150) == "red",
           f"got {classify_band(169, 57, 120, s_body=16, v_body=150)}")
+    # The blue population measured across 2,017 EALPR plates is one cloud at
+    # H 90-120, not two. Both ends must land on the same category.
+    for h in (95, 104, 118):
+        check(f"blue band H={h} reads as blue",
+              classify_band(h, 150, 130, s_body=20) == "blue",
+              f"got {classify_band(h, 150, 130, s_body=20)}")
     # ...and red must map to the truck codes, which is the whole point of
     # reading colour: it is evidence for the C/D classes.
     check("red band supports the truck classes",

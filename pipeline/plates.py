@@ -18,13 +18,16 @@ declined otherwise, rather than emitting confident nonsense.
 band by vehicle CATEGORY, which is independent evidence for exactly the classes
 docs/finetuning-plan.md calls hardest (C light truck / V van / A private car):
 
-    light blue  private car "malaky"      -> A
+    blue        private car "malaky"      -> A
     red         truck / tractor           -> C or D
     orange      taxi                      -> A (commercial use)
-    brown       commercial vehicle        -> C / V
-    dark blue   police
     green       diplomatic
     yellow      customs unpaid
+
+Measured on 2,017 EALPR plates, 89% are blue — so colour is a strong signal for
+"this is NOT a private car" and a weak one for anything finer. Police plates are
+a darker blue in principle and are not separable from private at this
+resolution, so they are not claimed.
 
 The band is a large flat patch of colour, which is precisely the kind of signal
 that survives heavy downscaling — a 34 px plate still carries a usable hue even
@@ -49,14 +52,22 @@ import numpy as np
 #
 # Each entry: (h_lo, h_hi, s_min, v_min). Achromatic classes (white/black) are
 # handled separately since hue is meaningless at low saturation.
+# Hue bands were re-fitted against the 2,017 usable EALPR plates rather than
+# guessed. See tools/build_plate_colour_set.py; the measured distribution is in
+# docs/anpr-plan.md.
+#
+# The big correction: light_blue and dark_blue were separate categories, and the
+# data says they are ONE population. 89% of all Egyptian plates sit in H 90-120
+# with no bimodality — the old split was cutting a single blue cloud in half on
+# brightness, which is why a private car in street_egypt.mp4 came out "police".
+# Police plates do exist, but this camera cannot separate them from private ones
+# by band colour, and inventing the distinction is worse than declining it.
 PLATE_COLORS: dict[str, tuple[float, float, float, float]] = {
-    "red":        (0, 10, 70, 50),      # trucks / tractors  (wraps, see _hue_match)
-    "orange":     (11, 22, 90, 80),     # taxi
-    "yellow":     (23, 33, 90, 90),     # customs unpaid
-    "green":      (40, 85, 50, 40),     # diplomatic
-    "light_blue": (86, 105, 40, 90),    # private car "malaky"
-    "dark_blue":  (106, 130, 60, 25),   # police
-    "brown":      (5, 20, 60, 25),      # commercial (dark, low-value orange)
+    "red":    (0, 12, 60, 40),      # truck / tractor   (wraps — see classify_band)
+    "orange": (13, 25, 70, 70),     # taxi
+    "yellow": (26, 36, 80, 90),     # customs unpaid
+    "green":  (40, 85, 45, 40),     # diplomatic
+    "blue":   (86, 125, 35, 25),    # private "malaky" (and police — not separable)
 }
 
 # Plate colour -> mentor vehicle-class codes it supports. Used as EVIDENCE that
@@ -64,10 +75,8 @@ PLATE_COLORS: dict[str, tuple[float, float, float, float]] = {
 # shows its own red plate, and a repainted plate is not a reclassification.
 COLOR_TO_CODES: dict[str, tuple[str, ...]] = {
     "red": ("C", "D"),
-    "brown": ("C", "V"),
-    "light_blue": ("A",),
+    "blue": ("A",),
     "orange": ("A",),
-    "dark_blue": ("A",),
     "green": ("A",),
     "yellow": (),
     "white": (),
@@ -81,9 +90,7 @@ PLATE_BGR: dict[str, tuple[int, int, int]] = {
     "orange": (60, 150, 250),
     "yellow": (60, 220, 240),
     "green": (90, 200, 90),
-    "light_blue": (240, 200, 120),
-    "dark_blue": (200, 90, 40),
-    "brown": (60, 90, 140),
+    "blue": (230, 150, 60),
     "white": (230, 230, 230),
     "unknown": (150, 150, 150),
 }
@@ -93,9 +100,7 @@ COLOR_DISPLAY = {
     "orange": "Orange — taxi",
     "yellow": "Yellow — customs unpaid",
     "green": "Green — diplomatic",
-    "light_blue": "Light blue — private",
-    "dark_blue": "Dark blue — police",
-    "brown": "Brown — commercial",
+    "blue": "Blue — private (malaky)",
     "white": "White — no band read",
     "unknown": "Unknown",
 }
@@ -138,10 +143,11 @@ def classify_band(h: float, s: float, v: float,
     at S=16 — a 41-point margin that is unambiguous even though the absolute
     value is low.
 
-    CAVEAT: the margin is currently anchored on a handful of hand-located plates.
-    It should be re-fitted against the EALPR dataset, which has enough labelled
-    Egyptian plates to set it from a distribution rather than an example — the
-    same reservation classify.HEAVY_MIN_FRONTAL_AREA_M2 carries.
+    The margin has since been checked against 2,017 EALPR plates: 82% clear a
+    40-point band-vs-body margin, and the 18% that do not are genuinely faded or
+    washed-out bands that no threshold should claim. The 20-point floor used here
+    is deliberately below that, because a CCTV plate is dimmer than a EALPR
+    close-up and the absolute floor catches the rest.
     """
     if s < max(s_body + SAT_MARGIN_OVER_BODY, SAT_ABSOLUTE_FLOOR):
         # Not meaningfully more colourful than the plate's own white body, so

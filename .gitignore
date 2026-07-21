@@ -13,6 +13,11 @@ data/jobs/*
 # PLATES — personal data. They must not be published, even to a private repo.
 # Share them with annotators over an approved internal channel instead.
 data/dataset/
+# Downloaded plate datasets (EALPR etc). Real photographs of identifiable
+# vehicles and readable plates — personal data under Egypt PDPL 151/2020, and
+# ~280MB besides. Fetch them with tools/fetch_plate_data.py / the EALPR clone;
+# never commit them, not even to a private repo.
+data/plates/
 # YOLO weights live in the project root (Ultralytics downloads them there) as
 # well as models/ — both must be ignored, they are ~30 MB.
 *.pt
