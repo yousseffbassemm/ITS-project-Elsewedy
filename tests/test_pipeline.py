@@ -591,6 +591,40 @@ def test_missing_plate_model_does_not_crash() -> None:
     check("summary works with no model", s["plates_detected"] == 0)
 
 
+def test_ocr_gate_blocks_hallucinated_reads() -> None:
+    """Below the floor the OCR engine must not be CALLED, not merely ignored.
+
+    Measured, not hypothetical: a real Egyptian ALPR model (30-class Arabic
+    character detector) run on street_egypt.mp4 emitted 43 character detections.
+    Every one was a false positive — none fell inside a detected plate, and their
+    median box was 13 px wide where a real character on a 30 px plate is ~4-6 px.
+    Mean confidence 0.28, with one class accounting for 31 of the 43.
+
+    So OCR on inadequate footage does not fail silently; it produces
+    confident-looking garbage. That is more dangerous than an empty column,
+    because a plate number that looks plausible gets believed. The resolution
+    gate is what stops it, and it has to gate the CALL.
+    """
+    calls: list = []
+
+    def spy(crop):
+        calls.append(crop.shape)
+        return ("HALLUCINATED", 0.9)
+
+    frame = np.full((720, 1280, 3), 120, np.uint8)
+    r = PlateReader(ocr=spy)
+    for w in (24, 30, 34, 35):                  # the real street_egypt range
+        r._observe_one(1, frame, (100, 400, 100 + w, 400 + w // 2))
+    check("OCR is never invoked below the floor", not calls, f"{len(calls)} calls")
+    check("no hallucinated text reaches the report", r.text_of(1)[0] is None)
+
+    r2 = PlateReader(ocr=spy)
+    for _ in range(3):
+        r2._observe_one(2, frame, (100, 400, 260, 455))    # 160 px — adequate
+    check("OCR does run on adequate footage", len(calls) == 3, f"{len(calls)}")
+    check("its text is captured", r2.text_of(2)[0] == "HALLUCINATED")
+
+
 def test_ocr_absence_is_explained() -> None:
     """An empty OCR column must say WHY, or it reads as a broken model.
 
@@ -652,6 +686,7 @@ def main() -> int:
     test_plate_goes_to_the_tightest_containing_vehicle()
     test_plate_colour_needs_repeated_evidence()
     test_missing_plate_model_does_not_crash()
+    test_ocr_gate_blocks_hallucinated_reads()
     test_ocr_absence_is_explained()
     print("congestion")
     test_congestion_needs_actual_traffic()

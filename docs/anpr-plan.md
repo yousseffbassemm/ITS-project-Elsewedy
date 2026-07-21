@@ -156,6 +156,55 @@ re-fitting the thresholds against EALPR rather than trusting hand-set ones.
 
 ---
 
+## 2c. The decisive experiment: a real Egyptian ALPR model on this footage
+
+The argument above is geometric. This is the direct test, and it settles it.
+
+**No training was required.** `sshdopey/egyptian-license-plates` on HuggingFace
+publishes Egyptian ALPR models that do plate detection *and* Arabic character
+recognition in one pass — 30+ classes covering Arabic digits and the letters the
+traffic authority issues (`alef`, `baa`, `geem`, `daal`, `Seen`, `Saad`, `Meem`,
+`Noon`, `Laam`, `Wow`, `Yeeh`, ...). Downloaded to `models/eg_license_yolo_med_97.pt`.
+
+Run on `street_egypt.mp4`:
+
+| result | value |
+|---|---|
+| plates detected | 9 (median 30 px) |
+| characters emitted | 43 |
+| characters **inside** a detected plate | **0** |
+| median character box width | 13 px (a real char on a 30 px plate is ~4-6 px) |
+| mean character confidence | 0.28, with one class making up 31 of 43 |
+
+**Every character was a false positive.** The model reads nothing here — not
+because it is a bad model, but because the glyphs are not in the file.
+
+### The important part
+
+OCR on inadequate footage **does not fail silently**. It emits confident-looking
+garbage. A pipeline that simply forwarded this model's output would publish
+plate numbers that are pure hallucination, and they would look plausible enough
+to be believed and acted on.
+
+This is why `plate_ocr_min_px` gates the **call**, not the result: below the
+floor the OCR engine is never invoked, so no invented plate can reach
+`analytics.json`. Verified in `tests/test_pipeline.py` — zero invocations across
+the real 24-35 px range, normal operation at 160 px.
+
+### The controlled proof
+
+![resolution proof](img/resolution_proof.png)
+
+One plate from the 4K clip, at its native 126 px and downscaled to the 34 px this
+project's camera delivers. Same plate, same camera, same lighting — resolution is
+the only variable. At 126 px it reads `3AE 6211`; at 34 px it is a smear.
+
+Note what survives the downscale: the **blue band is still clearly visible** while
+the characters are gone. That is the colour/OCR split in a single image, and it is
+why colour is a deliverable here and OCR is not.
+
+---
+
 ## 3. Models to train
 
 Two models, trained separately because they answer different questions.

@@ -228,7 +228,7 @@ class PlateReader:
             tid = self._owner(pb, det)
             if tid is None:
                 continue
-            self._observe_one(tid, frame, pb, det)
+            self._observe_one(tid, frame, pb)
 
     @staticmethod
     def _owner(plate_box, det) -> int | None:
@@ -257,7 +257,7 @@ class PlateReader:
                 best, best_area = int(det.tracker_id[i]), area
         return best
 
-    def _observe_one(self, tid: int, frame: np.ndarray, plate_box, det) -> None:
+    def _observe_one(self, tid: int, frame: np.ndarray, plate_box) -> None:
         h, w = frame.shape[:2]
         px1, py1, px2, py2 = (int(v) for v in plate_box)
         px1, py1 = max(px1, 0), max(py1, 0)
