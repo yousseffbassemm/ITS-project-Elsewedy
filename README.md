@@ -29,6 +29,13 @@ Built for the Elsewedy Electric AI-department Intelligent-Transportation-Systems
   is keyed to the vehicle ID, not to the detected class, which flickers). The
   counting line is an internal reference and is not drawn; in/out totals still
   appear in the report. Toggle with `draw_counting_line` / `draw_in_out_hud`.
+- **Licence plates** — plate detection + **plate colour**, which in Egypt encodes
+  vehicle category (red = truck, light blue = private, brown = commercial) and so
+  gives independent evidence for the hard A/C/V classes. **Plate OCR is
+  footage-limited**: it needs ~100 px of plate width and the calibrated clip
+  provides ~34 px, so it is a camera limit rather than a model one. Check any clip
+  before training with `python -m tools.plate_footage_check`. See
+  [`docs/anpr-plan.md`](docs/anpr-plan.md).
 - **Dashboard** — drag-drop upload → live progress → annotated video + KPIs +
   charts (volume, vehicle mix, speed histogram, directional flow, lane analytics,
   congestion timeline). Full-screen, Elsewedy-branded. Export to PDF from the browser.
@@ -125,15 +132,27 @@ between two ground marks is better still. See `docs/methodology.md` §3.4.
 ## Layout
 ```
 pipeline/   detect_track · reid · counting · classify · lanes · speed · congestion
-            video_writer · process_video · config · bytetrack.yaml
+            plates · video_writer · process_video · config · bytetrack.yaml
 app/        FastAPI backend (main) + background job runner (jobs)
 web/        index.html · results.html · theme.css · app.js · vendor/chart.min.js
 data/jobs/  per-job artifacts (input, annotated.mp4, analytics.json)
-docs/       methodology.md (the write-up)
+docs/       methodology.md · finetuning-plan.md · anpr-plan.md
+notebooks/  train_plates_colab.ipynb (thin Colab driver; logic is in tools/)
+tools/      harvest_dataset · plate_footage_check · train_plates
 samples/    demo clips
 ```
 
+## Training on a GPU (Colab)
+This machine is CPU-only, so model training happens on a free Colab GPU. The
+workflow is **edit in VS Code → push → Colab pulls**; the training logic lives in
+`tools/train_plates.py` rather than inside the notebook, so it stays lintable and
+reviewable. Open `notebooks/train_plates_colab.ipynb` in Colab and run it.
+
+Before spending GPU time on OCR, run `tools/plate_footage_check` on the target
+footage. Training cannot add pixels the sensor never captured, and an
+unreadable plate looks exactly like an undertrained model.
+
 ## Roadmap
-Fine-tune on Egyptian classes (tuk-tuk, microbus), ANPR + violations
-(red-light / wrong-way), multi-camera corridor view, and a live/edge mode.
-See `docs/methodology.md`.
+Fine-tune on Egyptian classes (tuk-tuk, microbus), plate OCR once adequate
+footage exists, violations (red-light / wrong-way), multi-camera corridor view,
+and a live/edge mode. See `docs/methodology.md` and `docs/anpr-plan.md`.
