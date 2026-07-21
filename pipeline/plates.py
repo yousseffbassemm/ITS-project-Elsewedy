@@ -351,8 +351,14 @@ class PlateReader:
                     "configured — this footage COULD be read")
         return f"plate p90 {p90:.0f}px >= {self.min_px_for_ocr:.0f}px floor — OCR ran"
 
-    def summary(self, tracks) -> dict:
-        """Report for analytics.json, including why OCR did or did not run."""
+    def summary(self, tracks, classifier=None, lane_of=None,
+                display_id=None) -> dict:
+        """Report for analytics.json, including why OCR did or did not run.
+
+        The optional arguments attach each plate to the vehicle it came from —
+        its class, lane and on-screen number. A plate row is only actionable in
+        context: "red plate" matters because it is on the lorry in lane 4.
+        """
         rows, widths = [], []
         for tid in tracks:
             c = self.color_of(tid)
@@ -360,11 +366,24 @@ class PlateReader:
             if px:
                 widths.append(px)
             text, tconf = self.text_of(tid)
+            code = classifier.resolve(tid) if classifier is not None else None
+            lane = None if lane_of is None else lane_of.get(int(tid))
             rows.append({
                 "track": int(tid),
+                "vehicle_no": (display_id(tid) if display_id is not None
+                               else None),
+                "vehicle_class": code,
+                # Lanes are 0-indexed internally and 1-indexed everywhere a human
+                # reads them; match the rest of the report.
+                "lane": None if lane is None else lane + 1,
                 "plate_color": c,
                 "plate_color_display": COLOR_DISPLAY.get(c, c),
                 "supports_classes": list(COLOR_TO_CODES.get(c, ())),
+                # Whether the plate colour AGREES with the class the pipeline
+                # reached independently. Disagreement is the interesting case —
+                # it is either a misread band or a genuinely unusual vehicle.
+                "agrees_with_class": (None if not code or not COLOR_TO_CODES.get(c)
+                                      else code in COLOR_TO_CODES[c]),
                 "plate_px": round(px, 1),
                 "plate_text": text,
                 "plate_text_confidence": round(tconf, 2),

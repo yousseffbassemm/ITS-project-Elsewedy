@@ -359,7 +359,8 @@ def process_video(
         "throughput": throughput,
         # Only vehicles that were actually counted, so the plate table lines up
         # with every other total in the report.
-        **({"plates": plates.summary(counter.vehicle_events)}
+        **({"plates": plates.summary(counter.vehicle_events, classifier,
+                                     counter.lane_of, detector.display_id)}
            if plates is not None else {}),
         "timeseries": timeseries,
         "class_scheme": {c: n for c, (n, _) in MENTOR_CLASSES.items()},
