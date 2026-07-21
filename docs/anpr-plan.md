@@ -205,6 +205,40 @@ why colour is a deliverable here and OCR is not.
 
 ---
 
+## 2d. A fine-tune that failed, and why it is not shipped
+
+The plate detector was fine-tuned on EALPR's 2,087 labelled vehicles, rescaled to
+the deployment plate size and composited onto 1280x720 frames
+(`tools/prep_plate_dataset.py`). It trained cleanly on a T4 and scored
+**mAP50 0.985** on the held-out val split.
+
+On the real clip it is a **regression**:
+
+| | usable plates (>=20px AND on a vehicle) | false positives (off-vehicle) |
+|---|---|---|
+| baseline | **11** | **1** |
+| fine-tuned | 3 | **16** |
+
+Raw detection count went *up* (26 -> 39), which is what makes this dangerous: the
+headline number improved while the thing it was supposed to deliver got worse.
+Median detection width fell from 19.8px to 10.7px, and inspecting the new
+detections showed what they were — roadside **guardrail reflectors**, not plates.
+
+**Root cause: the synthetic backgrounds.** Sources were composited onto flat grey
+canvases, so the model learned "small bright rectangle on a plain background".
+That describes a reflector better than it describes a plate in a road scene. The
+plate-size matching was right; the background was not.
+
+**Fix, if this is retried:** paste the rescaled vehicles onto real road frames
+sampled from the target footage rather than onto grey, and add
+hard-negative crops (reflectors, lights, sign posts) so the model is forced to
+tell them apart. Judge it on the usable/false-positive table above, never on
+val mAP.
+
+The baseline `models/plate_detect.pt` remains the shipped detector.
+
+---
+
 ## 3. Models to train
 
 Two models, trained separately because they answer different questions.
