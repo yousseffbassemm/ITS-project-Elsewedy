@@ -517,6 +517,49 @@ def test_neutral_surfaces_are_not_given_a_colour() -> None:
               got in ("white", "unknown"), f"got {got}")
 
 
+def test_oversized_plate_box_is_rejected() -> None:
+    """A 'plate' most of a vehicle wide is a false positive, not a plate.
+
+    Running the plate detector on tight vehicle CROPS put it far outside its
+    training domain — it was trained on full scenes where plates are small
+    objects. On a 100x126 crop it returned a box 83% of the vehicle width at 0.73
+    confidence: the whole rear panel. Those detections reported ~150 px plates in
+    a clip whose real maximum is ~35 px, which made unreadable footage look
+    adequate for OCR — precisely the wrong conclusion, arrived at confidently.
+
+    Detection now runs per-frame, and this guard is the backstop.
+    """
+    det = sv.Detections(
+        xyxy=np.array([[100.0, 100.0, 200.0, 226.0]]),   # a 100x126 vehicle
+        class_id=np.array([2]), tracker_id=np.array([1]),
+    )
+    # 83 px wide inside a 100 px vehicle — the real false positive observed.
+    check("an 83%-of-vehicle box is not accepted as a plate",
+          PlateReader._owner((105.0, 180.0, 188.0, 200.0), det) is None)
+    # ~18 px is the plausible real plate, and it must still be attached.
+    check("a plausibly sized plate is attached to its vehicle",
+          PlateReader._owner((140.0, 200.0, 158.0, 210.0), det) == 1)
+    # A plate on no vehicle at all belongs to nobody.
+    check("a plate outside every vehicle is dropped",
+          PlateReader._owner((600.0, 600.0, 618.0, 610.0), det) is None)
+
+
+def test_plate_goes_to_the_tightest_containing_vehicle() -> None:
+    """Overlapping boxes: the smallest container owns the plate.
+
+    On this camera a distant vehicle is often framed inside a nearer one's box,
+    and attaching its plate to the wrong vehicle would corrupt that vehicle's
+    colour vote and therefore its class evidence.
+    """
+    det = sv.Detections(
+        xyxy=np.array([[0.0, 0.0, 400.0, 400.0],        # big near vehicle
+                       [100.0, 100.0, 180.0, 180.0]]),  # small far vehicle
+        class_id=np.array([2, 2]), tracker_id=np.array([7, 9]),
+    )
+    check("the tighter vehicle owns the plate",
+          PlateReader._owner((130.0, 150.0, 142.0, 158.0), det) == 9)
+
+
 def test_plate_colour_needs_repeated_evidence() -> None:
     """One frame is not enough — a brake light bleeding onto the band is red too.
 
@@ -605,6 +648,8 @@ def main() -> int:
     print("plates")
     test_washed_out_band_is_still_read()
     test_neutral_surfaces_are_not_given_a_colour()
+    test_oversized_plate_box_is_rejected()
+    test_plate_goes_to_the_tightest_containing_vehicle()
     test_plate_colour_needs_repeated_evidence()
     test_missing_plate_model_does_not_crash()
     test_ocr_absence_is_explained()

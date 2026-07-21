@@ -46,6 +46,27 @@ class PipelineConfig:
     roi_gated_tracking: bool = True
     roi_margin_px: int = 45
 
+    # --- Licence plates -----------------------------------------------------------
+    # Plate detection and plate COLOUR need only ~20 px of plate width and work on
+    # this camera. Plate OCR needs ~100 px and does not: measured four ways, plates
+    # here top out at ~35 px. See docs/anpr-plan.md and tools/plate_footage_check.
+    #
+    # The stage is off by default because it costs a second inference pass per
+    # vehicle crop, which matters on CPU. Turn it on with ITS_PLATES=1.
+    plates: bool = False
+    plate_model: str = "models/plate_detect.pt"
+    # Plates are small objects in a full frame, so the plate pass runs at a
+    # higher resolution than the vehicle pass — recall collapses below ~1280.
+    plate_imgsz: int = 1280
+    # OCR weights. Empty means no OCR engine — the report then says so rather than
+    # leaving an unexplained empty column.
+    plate_ocr_model: str = ""
+    # Plate width below which character recognition is not attempted. Emitting a
+    # confident string from a 30 px plate is worse than emitting nothing.
+    plate_ocr_min_px: float = 100.0
+    # Draw the plate box and its colour on the annotated video.
+    draw_plates: bool = True
+
     # --- Annotation overlay -------------------------------------------------------
     # The counting line and its IN/OUT tag are an internal reference: counting
     # still happens, and in/out totals are still reported in analytics.json and on

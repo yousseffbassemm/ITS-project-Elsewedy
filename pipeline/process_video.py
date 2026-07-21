@@ -32,6 +32,7 @@ from .congestion import CongestionMonitor
 from .counting import LineCounter
 from .detect_track import VehicleDetector, visible_mask
 from .lanes import LANE_COLORS_HEX, LaneModel
+from .plates import PLATE_BGR, PlateReader
 from .speed import SpeedEstimator
 from .video_writer import FFmpegH264Writer
 
@@ -53,6 +54,26 @@ def _labels(det: sv.Detections, speeds: dict[int, float], classifier,
         head = f"#{num} {code}" if num is not None else code
         out.append(f"{head} {speeds[tid]:.0f}km/h" if tid in speeds else head)
     return out
+
+
+def _draw_plates(frame, det: sv.Detections, plates: PlateReader):
+    """Outline each located plate in the colour category it resolved to.
+
+    Drawn in the plate's OWN colour so the overlay explains itself: a red box is
+    a red (truck) plate. Deliberately no text — at this scale the plate is ~30 px
+    wide and a label would cover the vehicle it belongs to.
+    """
+    if det.tracker_id is None:
+        return
+    for tid in det.tracker_id:
+        box = plates.box_of(int(tid))
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        color = PLATE_BGR.get(plates.color_of(int(tid)), PLATE_BGR["unknown"])
+        # 1 px, because the box is only a few pixels tall — a thicker line would
+        # hide the very thing it is pointing at.
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
 
 
 def _draw_counting_line(frame, counter: LineCounter):
@@ -132,6 +153,11 @@ def process_video(
     classifier = VehicleClassifier(speed.transformer, detector.native_codes)
     vehicle_ids = detector.vehicle_ids
 
+    # Plate stage. Optional and self-contained: if the weights are missing it
+    # records why and every other analytic is unaffected.
+    plates = (PlateReader(cfg.plate_model, min_px_for_ocr=cfg.plate_ocr_min_px)
+              if cfg.plates else None)
+
     # Colour by TRACK, not by class. supervision's default is ColorLookup.CLASS,
     # and base YOLO flip-flops between car/truck/bus on the same vehicle from one
     # frame to the next, so a box visibly cycled through palette colours while the
@@ -179,6 +205,11 @@ def process_video(
                     if cid in vehicle_ids:
                         classifier.observe(int(det.tracker_id[i]), cid,
                                            det.xyxy[i], float(confs[i]))
+                # Plates are found once across the whole frame, then matched to
+                # vehicles — see PlateReader._find_plates_frame for why per-crop
+                # detection is wrong here.
+                if plates is not None:
+                    plates.observe_frame(frame, det, imgsz=cfg.plate_imgsz)
             counter.update(det)
             speeds = speed.update(det, frame_idx)
             avg_speed = speed.frame_avg()
@@ -208,6 +239,8 @@ def process_video(
                     frame = label.annotate(
                         frame, vis,
                         labels=_labels(vis, speeds, classifier, detector))
+            if plates is not None and cfg.draw_plates and len(det):
+                _draw_plates(frame, det, plates)
             if cfg.draw_counting_line:
                 _draw_counting_line(frame, counter)
             _draw_hud(frame, counter, level, avg_speed, t_sec, cfg.calibrated,
@@ -324,6 +357,10 @@ def process_video(
         "congestion": congestion.summary(),
         "lanes": lanes_out,
         "throughput": throughput,
+        # Only vehicles that were actually counted, so the plate table lines up
+        # with every other total in the report.
+        **({"plates": plates.summary(counter.vehicle_events)}
+           if plates is not None else {}),
         "timeseries": timeseries,
         "class_scheme": {c: n for c, (n, _) in MENTOR_CLASSES.items()},
         "class_distribution": counter.summary(classifier)["by_class"],
@@ -358,6 +395,9 @@ def main():
     ap.add_argument("--conf", type=float, default=None)
     ap.add_argument("--stride", type=int, default=None)
     ap.add_argument("--config", default=None, help="optional JSON config file")
+    ap.add_argument("--plates", action="store_true",
+                    help="enable the licence-plate stage (detection + colour)")
+    ap.add_argument("--plate-model", default=None)
     args = ap.parse_args()
 
     cfg = PipelineConfig()
@@ -374,6 +414,10 @@ def main():
         cfg.conf = args.conf
     if args.stride:
         cfg.frame_stride = args.stride
+    if args.plates:
+        cfg.plates = True
+    if args.plate_model:
+        cfg.plate_model = args.plate_model
 
     def cb(pct, msg):
         print(f"[{pct:5.1f}%] {msg}", flush=True)

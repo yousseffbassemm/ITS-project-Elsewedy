@@ -121,6 +121,41 @@ are all correctly given no colour. Regression tests in `tests/test_pipeline.py`.
 
 ---
 
+## 2b. Measured results on `street_egypt.mp4`
+
+The stage runs today, with a pretrained YOLOv11 plate detector
+(`models/plate_detect.pt`, one class, from HuggingFace — no training required for
+stage 1):
+
+```bash
+python -m pipeline.process_video --input samples/street_egypt.mp4 \
+    --output-dir data/jobs/plates_demo --stride 6 --plates
+```
+
+| metric | result |
+|---|---|
+| plates detected | 36 across the clip |
+| plate width p90 | **34.6 px** |
+| colour mix | 2 red, 1 dark blue, 2 unresolved |
+| OCR | correctly declined, with the reason recorded |
+
+The detector's p90 of 34.6 px is a **fourth independent confirmation** of the
+34 px figure in §1, and the one that matters most because it comes from a real
+trained model rather than an estimate.
+
+**Cross-check.** The pipeline independently classified these five vehicles as one
+private car and four trucks. Both resolved red plates sit on vehicles classified
+`C`/`D` — the colour signal and the size-based classifier agree without either
+being told about the other.
+
+**Known weak spot.** One vehicle classified `A` (private car) resolved as
+**dark blue** (police) rather than light blue (private). Light blue and dark blue
+differ mainly in *value*, not hue, and value is what a 24 px plate loses first —
+this is the exact confusion pair flagged in §4. It is the strongest argument for
+re-fitting the thresholds against EALPR rather than trusting hand-set ones.
+
+---
+
 ## 3. Models to train
 
 Two models, trained separately because they answer different questions.

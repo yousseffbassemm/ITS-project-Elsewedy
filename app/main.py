@@ -74,6 +74,9 @@ def _cfg() -> PipelineConfig:
     cfg.conf = float(os.getenv("ITS_CONF", cfg.conf))
     cfg.stable_ids = _flag("ITS_STABLE_IDS", cfg.stable_ids)
     cfg.roi_gated_tracking = _flag("ITS_ROI_GATED", cfg.roi_gated_tracking)
+    cfg.plates = _flag("ITS_PLATES", cfg.plates)
+    cfg.plate_model = os.getenv("ITS_PLATE_MODEL", cfg.plate_model)
+    cfg.plate_ocr_model = os.getenv("ITS_PLATE_OCR_MODEL", cfg.plate_ocr_model)
     return cfg
 
 

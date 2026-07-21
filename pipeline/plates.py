@@ -74,6 +74,20 @@ COLOR_TO_CODES: dict[str, tuple[str, ...]] = {
     "unknown": (),
 }
 
+# Draw colour for each plate category (BGR). Chosen to READ as the plate colour
+# it represents, so the overlay is self-explaining without a legend.
+PLATE_BGR: dict[str, tuple[int, int, int]] = {
+    "red": (60, 60, 220),
+    "orange": (60, 150, 250),
+    "yellow": (60, 220, 240),
+    "green": (90, 200, 90),
+    "light_blue": (240, 200, 120),
+    "dark_blue": (200, 90, 40),
+    "brown": (60, 90, 140),
+    "white": (230, 230, 230),
+    "unknown": (150, 150, 150),
+}
+
 COLOR_DISPLAY = {
     "red": "Red — truck/tractor",
     "orange": "Orange — taxi",
@@ -91,6 +105,12 @@ COLOR_DISPLAY = {
 MIN_PX_FOR_COLOR = 20.0
 MIN_PX_FOR_OCR = 100.0
 MIN_SAMPLES = 3          # per-track colour votes before a colour is reported
+
+# A plate wider than this fraction of its vehicle's box is not a plate. Real
+# plates are ~18% of vehicle width (0.32 m on a 1.8 m car); 0.40 leaves room for
+# a motorcycle, whose plate is a much larger share of a narrow vehicle, while
+# still rejecting a detector that has locked onto the whole rear panel.
+MAX_PLATE_FRAC_OF_VEHICLE = 0.40
 
 
 # How much more saturated the band must be than the plate BODY before it counts
@@ -172,73 +192,86 @@ class PlateReader:
         self.detections = 0
 
     # --- geometry ---------------------------------------------------------------
-    def _find_plate(self, crop: np.ndarray) -> tuple[int, int, int, int] | None:
-        """Plate box within a vehicle crop, in crop coordinates."""
-        if self.model is not None:
-            r = self.model.predict(crop, verbose=False, conf=0.25)[0]
-            if len(r.boxes) == 0:
-                return None
-            # Largest detection: a vehicle carries one plate on the face we see,
-            # and the biggest box is the best-resolved candidate.
-            b = max(r.boxes.xyxy.cpu().numpy(),
-                    key=lambda z: (z[2] - z[0]) * (z[3] - z[1]))
-            return tuple(int(v) for v in b)          # type: ignore[return-value]
-        return self._find_plate_heuristic(crop)
+    def _find_plates_frame(self, frame: np.ndarray, imgsz: int
+                           ) -> list[tuple[float, float, float, float]]:
+        """Every plate in the WHOLE frame, in frame coordinates.
 
-    @staticmethod
-    def _find_plate_heuristic(crop: np.ndarray) -> tuple[int, int, int, int] | None:
-        """Fallback with no trained model: bright, wide, low-in-frame rectangle.
+        Detection runs on the full frame, not on per-vehicle crops, and this is a
+        correctness issue rather than an optimisation. The detector was trained on
+        full scenes, where a plate is a small object. Handed a tight 100x126
+        vehicle crop it is far outside that domain — Ultralytics upscales the crop
+        to imgsz, the entire rear panel becomes plate-shaped, and it returned a
+        box 83% of the vehicle width at 0.73 confidence. Those false positives
+        then reported plates as ~150 px wide in a clip whose real maximum is
+        ~35 px, which would have made the footage look adequate for OCR when it
+        is not — the exact wrong conclusion.
 
-        This is a stopgap so the stage is testable before the detector is
-        trained. It is genuinely weak — headlights and reflective bumper trim
-        also qualify — and is not a substitute for the trained model.
+        Running once per frame is also ~10x cheaper than once per vehicle.
         """
-        h, w = crop.shape[:2]
-        if h < 40 or w < 40:
-            return None
-        low = crop[int(h * 0.55):, :]                # plates sit low on the body
-        grey = cv2.cvtColor(low, cv2.COLOR_BGR2GRAY)
-        thr = max(int(np.percentile(grey, 97)), 90)
-        _, mask = cv2.threshold(grey, thr, 255, cv2.THRESH_BINARY)
-        n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
-        best = None
-        for i in range(1, n):
-            x, y, bw, bh, area = (stats[i, k] for k in range(5))
-            if bw < 12 or bh < 5 or bh > bw:
-                continue
-            if not (1.6 <= bw / bh <= 6.0):          # plate aspect
-                continue
-            if best is None or area > best[4]:
-                best = (x, y, bw, bh, area)
-        if best is None:
-            return None
-        x, y, bw, bh, _ = best
-        return (x, y + int(h * 0.55), x + bw, y + bh + int(h * 0.55))
+        if self.model is None:
+            return []
+        r = self.model.predict(frame, verbose=False, conf=0.25, imgsz=imgsz)[0]
+        return [tuple(float(v) for v in b)           # type: ignore[misc]
+                for b in r.boxes.xyxy.cpu().numpy()]
+
 
     # --- evidence ---------------------------------------------------------------
-    def observe(self, tid: int, frame: np.ndarray, xyxy) -> None:
-        """Record one frame's plate evidence for a tracked vehicle."""
-        tid = int(tid)
+    def observe_frame(self, frame: np.ndarray, det, imgsz: int = 1280) -> None:
+        """Record one frame of plate evidence for every tracked vehicle in it.
+
+        Plates are detected once across the frame and then matched to vehicles by
+        containment, rather than each vehicle being cropped and searched.
+        """
+        if det.tracker_id is None or not len(det):
+            return
+        for pb in self._find_plates_frame(frame, imgsz):
+            tid = self._owner(pb, det)
+            if tid is None:
+                continue
+            self._observe_one(tid, frame, pb, det)
+
+    @staticmethod
+    def _owner(plate_box, det) -> int | None:
+        """Which tracked vehicle a plate belongs to, or None.
+
+        A plate must sit INSIDE a vehicle box — a detection floating on the road
+        belongs to nobody and is dropped rather than attached to whichever
+        vehicle happens to be nearest. Where boxes overlap, the smallest
+        containing vehicle wins: on this camera a distant vehicle is often framed
+        inside a nearer one's box, and the tighter fit is the true owner.
+        """
+        px1, py1, px2, py2 = plate_box
+        cx, cy = (px1 + px2) / 2.0, (py1 + py2) / 2.0
+        best, best_area = None, float("inf")
+        for i in range(len(det)):
+            x1, y1, x2, y2 = det.xyxy[i]
+            if not (x1 <= cx <= x2 and y1 <= cy <= y2):
+                continue
+            # A real plate is a small fraction of the vehicle it is bolted to.
+            # This guard is what catches a detector that has locked onto the
+            # whole rear panel instead of the plate.
+            if (px2 - px1) > MAX_PLATE_FRAC_OF_VEHICLE * (x2 - x1):
+                continue
+            area = (x2 - x1) * (y2 - y1)
+            if area < best_area:
+                best, best_area = int(det.tracker_id[i]), area
+        return best
+
+    def _observe_one(self, tid: int, frame: np.ndarray, plate_box, det) -> None:
         h, w = frame.shape[:2]
-        x1, y1, x2, y2 = (int(max(v, 0)) for v in xyxy)
-        x2, y2 = min(x2, w), min(y2, h)
-        if x2 - x1 < 32 or y2 - y1 < 32:
-            return
-        crop = frame[y1:y2, x1:x2]
-        box = self._find_plate(crop)
-        if box is None:
-            return
-        px1, py1, px2, py2 = box
+        px1, py1, px2, py2 = (int(v) for v in plate_box)
+        px1, py1 = max(px1, 0), max(py1, 0)
+        px2, py2 = min(px2, w), min(py2, h)
         pw, ph = px2 - px1, py2 - py1
         if pw < 8 or ph < 4:
             return
         self.detections += 1
         self._widths[tid].append(float(pw))
-        self._boxes[tid] = (x1 + px1, y1 + py1, x1 + px2, y1 + py2)
+        self._boxes[tid] = (px1, py1, px2, py2)
 
         if pw < MIN_PX_FOR_COLOR:
             return
-        plate = crop[py1:py2, px1:px2]
+        plate = frame[py1:py2, px1:px2]
         # The colour band occupies the top third; the rest is the white body
         # carrying the characters.
         split = max(ph // 3, 1)
