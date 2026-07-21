@@ -27,6 +27,9 @@ from pipeline.counting import LineCounter                # noqa: E402
 from pipeline.lanes import LaneModel                     # noqa: E402
 from pipeline.detect_track import visible_mask           # noqa: E402
 from pipeline.reid import IdStabilizer, _group, _iou     # noqa: E402
+from pipeline.plates import (                            # noqa: E402
+    COLOR_TO_CODES, PlateReader, classify_band,
+)
 from pipeline.speed import SpeedEstimator                # noqa: E402
 
 W, H, FPS = 1280, 720, 25.0
@@ -475,6 +478,103 @@ def test_analytics_invariants(path: str) -> None:
               a["throughput"]["busiest_lane"] in {l["lane"] for l in a["lanes"]})
 
 
+# --- plates -----------------------------------------------------------------------
+def test_washed_out_band_is_still_read() -> None:
+    """A real red plate band measured S=57 and an absolute S>=70 rule rejected it.
+
+    At a 32 px plate width, H.264 chroma subsampling leaves the band ~2 px of
+    chroma, so saturation is genuinely low for EVERY plate at this scale — the
+    threshold was tuned on clean plate photos that this camera never produces.
+    Judging the band against the plate's own white body fixes it without
+    loosening the rule into calling grey things coloured.
+
+    Numbers are the ones actually measured off the box truck in
+    samples/street_egypt.mp4 (band H=169 S=57 V=120, body S=16).
+    """
+    check("washed-out red band reads as red",
+          classify_band(169, 57, 120, s_body=16, v_body=150) == "red",
+          f"got {classify_band(169, 57, 120, s_body=16, v_body=150)}")
+    # ...and red must map to the truck codes, which is the whole point of
+    # reading colour: it is evidence for the C/D classes.
+    check("red band supports the truck classes",
+          set(COLOR_TO_CODES["red"]) == {"C", "D"})
+
+
+def test_neutral_surfaces_are_not_given_a_colour() -> None:
+    """The relative rule must not turn every bright patch into a category.
+
+    These are measured off the same frame: the white truck body, its roof, and
+    road asphalt. A colour reading on any of them would be a confident wrong
+    answer that then votes on the vehicle's class.
+    """
+    for name, (h, s, v, sb) in {
+        "white truck body": (3, 15, 192, 19),
+        "truck roof": (8, 25, 216, 22),
+        "road asphalt": (120, 32, 63, 44),
+    }.items():
+        got = classify_band(h, s, v, s_body=sb)
+        check(f"{name} is not given a plate colour",
+              got in ("white", "unknown"), f"got {got}")
+
+
+def test_plate_colour_needs_repeated_evidence() -> None:
+    """One frame is not enough — a brake light bleeding onto the band is red too.
+
+    A single sample must resolve to 'unknown' rather than committing, because at
+    this resolution any one frame's reading is noisy.
+    """
+    r = PlateReader()
+    r._colors[7]["red"] = 5.0
+    r._widths[7] = [30.0]                       # only one observation
+    check("a single plate sample does not resolve a colour",
+          r.color_of(7) == "unknown", f"got {r.color_of(7)}")
+    r._widths[7] = [30.0, 31.0, 29.0]           # now enough
+    r._cache.pop(7, None)
+    check("repeated samples do resolve", r.color_of(7) == "red",
+          f"got {r.color_of(7)}")
+
+
+def test_missing_plate_model_does_not_crash() -> None:
+    """A missing plate model must degrade, not take the whole run down.
+
+    The rest of the analytics — counting, speed, lanes, congestion — do not
+    depend on plates, so a missing weights file must never cost the user their
+    entire job.
+    """
+    r = PlateReader(weights="definitely_not_a_real_model.pt")
+    check("missing weights are reported, not raised", r.load_error is not None)
+    check("reader still usable without a model", r.color_of(1) == "unknown")
+    s = r.summary([1])
+    check("summary works with no model", s["plates_detected"] == 0)
+
+
+def test_ocr_absence_is_explained() -> None:
+    """An empty OCR column must say WHY, or it reads as a broken model.
+
+    This is the failure this whole stage is designed around: on 34 px footage
+    OCR cannot work, and if the report is silent about that, the natural
+    conclusion is that the model needs more training data — which would be
+    weeks spent on the wrong problem.
+    """
+    r = PlateReader()
+    r._widths[3] = [34.0, 33.0, 35.0]           # the real street_egypt range
+    s = r.summary([3])
+    check("no-OCR case is attributed to resolution",
+          "camera-resolution limit" in s["ocr_note"], s["ocr_note"])
+    check("the offending plate size is quoted",
+          f"{s['plate_px_p90']:.0f}px" in s["ocr_note"], s["ocr_note"])
+    check("the shortfall factor is quoted", "x short" in s["ocr_note"],
+          s["ocr_note"])
+
+    # Adequate footage with no engine must NOT be blamed on resolution — that
+    # would send someone off to buy a camera they already have.
+    r2 = PlateReader()
+    r2._widths[4] = [150.0, 155.0, 160.0]
+    note = r2.summary([4])["ocr_note"]
+    check("adequate footage is not blamed on resolution",
+          "COULD be read" in note, note)
+
+
 def main() -> int:
     print("counting")
     test_counting_is_stride_independent()
@@ -502,6 +602,12 @@ def main() -> int:
     test_class_vote_prefers_near_field_evidence()
     test_vans_are_not_guessed()
     test_finetuned_model_is_detected_and_takes_over()
+    print("plates")
+    test_washed_out_band_is_still_read()
+    test_neutral_surfaces_are_not_given_a_colour()
+    test_plate_colour_needs_repeated_evidence()
+    test_missing_plate_model_does_not_crash()
+    test_ocr_absence_is_explained()
     print("congestion")
     test_congestion_needs_actual_traffic()
     test_congestion_ignores_blips()
