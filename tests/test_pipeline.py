@@ -25,7 +25,7 @@ from pipeline.config import PipelineConfig               # noqa: E402
 from pipeline.congestion import CongestionMonitor        # noqa: E402
 from pipeline.counting import LineCounter                # noqa: E402
 from pipeline.lanes import LaneModel                     # noqa: E402
-from pipeline.detect_track import visible_mask           # noqa: E402
+from pipeline.detect_track import VehicleDetector, visible_mask  # noqa: E402
 from pipeline.reid import IdStabilizer, _group, _iou     # noqa: E402
 from pipeline.plates import (                            # noqa: E402
     COLOR_TO_CODES, PlateReader, classify_band,
@@ -479,6 +479,38 @@ def test_analytics_invariants(path: str) -> None:
               a["throughput"]["busiest_lane"] in {l["lane"] for l in a["lanes"]})
 
 
+def test_confirm_rate_detects_a_broken_stride() -> None:
+    """A stride too coarse to track must be REPORTED, not silently under-counted.
+
+    ByteTrack has no notion of frame_stride: it treats consecutive calls as
+    consecutive frames, so at a coarse stride its motion model is wrong by the
+    stride factor and association fails. Counting needs an unbroken id either
+    side of the line, so a modest drop in confirmation becomes a large drop in
+    counts. Measured on street_egypt.mp4:
+
+        stride 1  100% confirmed -> 18 counted
+        stride 3   99% confirmed -> 17 counted
+        stride 6   67% confirmed ->  5 counted    <- silent 72% under-count
+
+    The first version of this guard measured displacement only for tracks that
+    had ALREADY associated successfully, so it reported "OK" on the stride-6 run
+    that counted 5 of 18 — it could only observe the successes. The rate is
+    therefore measured on the RAW detection stream, before any tracker filtering.
+    """
+    d = VehicleDetector.__new__(VehicleDetector)
+    d.raw_detections, d.confirmed_detections = 0, 0
+    check("no detections reports healthy rather than dividing by zero",
+          d.confirm_rate == 1.0)
+
+    d.raw_detections, d.confirmed_detections = 100, 100
+    check("stride 1 (all confirmed) is healthy", d.confirm_rate >= 0.99)
+
+    # The real stride-6 measurement.
+    d.raw_detections, d.confirmed_detections = 100, 67
+    check("a broken stride is caught", d.confirm_rate < 0.95,
+          f"{d.confirm_rate:.2f}")
+
+
 # --- plates -----------------------------------------------------------------------
 def test_washed_out_band_is_still_read() -> None:
     """A real red plate band measured S=57 and an absolute S>=70 rule rejected it.
@@ -730,6 +762,7 @@ def main() -> int:
     test_class_vote_prefers_near_field_evidence()
     test_vans_are_not_guessed()
     test_finetuned_model_is_detected_and_takes_over()
+    test_confirm_rate_detects_a_broken_stride()
     print("plates")
     test_washed_out_band_is_still_read()
     test_neutral_surfaces_are_not_given_a_colour()

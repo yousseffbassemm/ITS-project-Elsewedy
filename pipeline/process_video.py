@@ -278,6 +278,39 @@ def process_video(
             if not failed:
                 raise
 
+    # Stride guard. ByteTrack has no notion of frame_stride — it treats
+    # consecutive calls as consecutive frames, so at a coarse stride its motion
+    # model is wrong by the stride factor and association starts failing.
+    # Counting needs an unbroken id either side of the line, so a modest drop in
+    # confirmation becomes a large drop in counts, silently.
+    #
+    # Measured on the RAW detection stream rather than on surviving tracks. An
+    # earlier version of this guard measured displacement only for tracks that
+    # had already associated successfully, and therefore reported "OK" on a run
+    # that under-counted 18 vehicles as 5 — it could only see the successes.
+    confirm = detector.confirm_rate
+    if confirm < 0.95:
+        stride_health = "BROKEN"
+        stride_note = (
+            f"only {confirm*100:.0f}% of detections received a track id at "
+            f"frame_stride={stride}. Counting needs an unbroken id either side of "
+            f"the line, so vehicles are being MISSED and totals are under-reported. "
+            f"Re-run with a lower frame_stride (1-3 for this camera)."
+        )
+    elif confirm < 0.99:
+        stride_health = "MARGINAL"
+        stride_note = (
+            f"{confirm*100:.1f}% of detections received a track id at "
+            f"frame_stride={stride}; a few vehicles may be missed. Use a lower "
+            "stride when the counts matter."
+        )
+    else:
+        stride_health = "OK"
+        stride_note = (f"{confirm*100:.1f}% of detections received a track id — "
+                       "tracking is healthy at this stride.")
+    if stride_health != "OK":
+        print(f"[WARNING] frame_stride={stride}: {stride_note}", flush=True)
+
     if processed == 0:
         raise RuntimeError(
             f"No frames could be decoded from {Path(input_path).name}. The file is "
@@ -359,6 +392,11 @@ def process_video(
             "stable_ids": cfg.stable_ids,
             "gap_reattachments": detector.stitches,
             "duplicate_merges": detector.merges,
+            # Whether frame_stride is low enough for the tracker to work at all.
+            # A silently under-counting run is the failure this catches.
+            "stride_health": stride_health,
+            "stride_note": stride_note,
+            "track_confirm_rate": round(confirm, 4),
             # On-screen numbering self-check: numbers must run 1..N with no gaps
             # and no reuse, so the first vehicle on screen is #1, the next #2, ...
             **(detector.stabilizer.numbering_report() if detector.stabilizer else {}),
