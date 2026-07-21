@@ -176,11 +176,14 @@ class PlateReader:
     """
 
     def __init__(self, weights: str | None = None, ocr=None,
-                 min_px_for_ocr: float = MIN_PX_FOR_OCR):
+                 min_px_for_ocr: float = MIN_PX_FOR_OCR, enhancer=None):
         self.model = None
         self.load_error: str | None = None
         self.ocr = ocr
         self.min_px_for_ocr = min_px_for_ocr
+        # Optional multi-frame pipeline: best-crop selection -> super-resolution
+        # -> OCR -> confidence-weighted vote. See pipeline/plate_ocr.py.
+        self.enhancer = enhancer
         if weights:
             try:
                 from ultralytics import YOLO
@@ -199,7 +202,7 @@ class PlateReader:
 
     # --- geometry ---------------------------------------------------------------
     def _find_plates_frame(self, frame: np.ndarray, imgsz: int
-                           ) -> list[tuple[float, float, float, float]]:
+                           ) -> list[tuple[float, float, float, float, float]]:
         """Every plate in the WHOLE frame, in frame coordinates.
 
         Detection runs on the full frame, not on per-vehicle crops, and this is a
@@ -217,8 +220,9 @@ class PlateReader:
         if self.model is None:
             return []
         r = self.model.predict(frame, verbose=False, conf=0.25, imgsz=imgsz)[0]
-        return [tuple(float(v) for v in b)           # type: ignore[misc]
-                for b in r.boxes.xyxy.cpu().numpy()]
+        confs = r.boxes.conf.cpu().numpy()
+        return [(*(float(v) for v in b), float(c))   # type: ignore[misc]
+                for b, c in zip(r.boxes.xyxy.cpu().numpy(), confs)]
 
 
     # --- evidence ---------------------------------------------------------------
@@ -231,10 +235,10 @@ class PlateReader:
         if det.tracker_id is None or not len(det):
             return
         for pb in self._find_plates_frame(frame, imgsz):
-            tid = self._owner(pb, det)
+            tid = self._owner(pb[:4], det)
             if tid is None:
                 continue
-            self._observe_one(tid, frame, pb)
+            self._observe_one(tid, frame, pb[:4], conf=pb[4])
 
     @staticmethod
     def _owner(plate_box, det) -> int | None:
@@ -263,7 +267,8 @@ class PlateReader:
                 best, best_area = int(det.tracker_id[i]), area
         return best
 
-    def _observe_one(self, tid: int, frame: np.ndarray, plate_box) -> None:
+    def _observe_one(self, tid: int, frame: np.ndarray, plate_box,
+                     conf: float = 1.0) -> None:
         h, w = frame.shape[:2]
         px1, py1, px2, py2 = (int(v) for v in plate_box)
         px1, py1 = max(px1, 0), max(py1, 0)
@@ -274,6 +279,11 @@ class PlateReader:
         self.detections += 1
         self._widths[tid].append(float(pw))
         self._boxes[tid] = (px1, py1, px2, py2)
+        # Offer this view to the best-frame selector. It keeps only the top few
+        # per vehicle, so the expensive super-resolution pass is spent on the
+        # crops most likely to read rather than on all of them.
+        if self.enhancer is not None:
+            self.enhancer.offer(tid, frame[py1:py2, px1:px2], conf)
 
         if pw < MIN_PX_FOR_COLOR:
             return
@@ -372,6 +382,13 @@ class PlateReader:
             if px:
                 widths.append(px)
             text, tconf = self.text_of(tid)
+            # The multi-frame pipeline is authoritative when it is enabled: it
+            # looked at the best crops rather than whichever frame happened to be
+            # processed, and its confidence is cross-crop agreement rather than
+            # one model's self-assessment.
+            enh = self.enhancer.resolve(tid) if self.enhancer is not None else None
+            if enh and enh.get("plate_text"):
+                text, tconf = enh["plate_text"], enh["plate_confidence"]
             code = classifier.resolve(tid) if classifier is not None else None
             lane = None if lane_of is None else lane_of.get(int(tid))
             rows.append({
@@ -393,6 +410,7 @@ class PlateReader:
                 "plate_px": round(px, 1),
                 "plate_text": text,
                 "plate_text_confidence": round(tconf, 2),
+                **({"enhance": enh} if enh else {}),
             })
         mix: dict[str, int] = defaultdict(int)
         for r in rows:
@@ -416,5 +434,11 @@ class PlateReader:
             # support OCR hides the fact that actually matters — someone would
             # plug in an engine, get nothing, and still not know why.
             "ocr_note": self._ocr_note(p90),
+            "enhance": (None if self.enhancer is None else {
+                "enabled": True,
+                "crops_kept_per_vehicle": self.enhancer.keep,
+                "super_resolution": self.enhancer.sr.mode if self.enhancer.sr else "off",
+                "debug_dir": str(self.enhancer.debug) if self.enhancer.debug else None,
+            }),
             "vehicles": rows,
         }

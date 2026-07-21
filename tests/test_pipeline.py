@@ -30,6 +30,7 @@ from pipeline.reid import IdStabilizer, _group, _iou     # noqa: E402
 from pipeline.plates import (                            # noqa: E402
     COLOR_TO_CODES, PlateReader, classify_band,
 )
+from pipeline.plate_ocr import crop_score, sharpness, vote  # noqa: E402
 from pipeline.speed import SpeedEstimator                # noqa: E402
 
 W, H, FPS = 1280, 720, 25.0
@@ -631,6 +632,50 @@ def test_ocr_gate_blocks_hallucinated_reads() -> None:
     check("its text is captured", r2.text_of(2)[0] == "HALLUCINATED")
 
 
+def test_sharper_crop_scores_higher() -> None:
+    """Best-crop selection must prefer a sharp small plate over a blurred big one.
+
+    This ordering is the whole point of scoring: a blurred plate is unreadable at
+    any size, so sharpness is weighted above size. A selector that just took the
+    largest crop would spend the super-resolution pass on motion blur.
+    """
+    sharp_small = crop_score(conf=0.5, sharp=4000, width=25)
+    blurry_big = crop_score(conf=0.9, sharp=40, width=60)
+    check("a sharp small crop beats a blurred large one",
+          sharp_small > blurry_big, f"{sharp_small:.3f} vs {blurry_big:.3f}")
+
+    # A flat image has essentially no Laplacian energy; an edge image has a lot.
+    flat = np.full((40, 80, 3), 128, np.uint8)
+    edges = flat.copy()
+    edges[:, ::4] = 255
+    check("sharpness separates flat from detailed",
+          sharpness(edges) > sharpness(flat) + 100,
+          f"{sharpness(edges):.1f} vs {sharpness(flat):.1f}")
+
+
+def test_vote_prefers_agreement_over_count() -> None:
+    """Voting is confidence-weighted, so blurry agreement cannot outvote clarity.
+
+    Three low-confidence reads agreeing on the wrong answer is exactly what
+    correlated failure looks like at this resolution, and it must not beat one
+    confident read. Weighting by count instead of confidence would get this
+    backwards.
+    """
+    text, conf, detail = vote([("ABC", 0.9), ("ABD", 0.2), ("ABD", 0.2)])
+    check("the confident read wins the disputed position", text == "ABC", text)
+    check("agreement is reported per position",
+          len(detail["per_position_agreement"]) == 3, str(detail))
+
+    # Reads of different lengths are not comparable position-by-position; the
+    # best-supported length must win before any character voting happens.
+    text2, _, d2 = vote([("AB", 0.9), ("ABCD", 0.3), ("ABCE", 0.3)])
+    check("the best-supported length is chosen first", text2 == "AB", text2)
+    check("only same-length reads are voted", d2["reads_at_best_length"] == 1,
+          str(d2))
+
+    check("no reads gives no answer", vote([])[0] == "")
+
+
 def test_ocr_absence_is_explained() -> None:
     """An empty OCR column must say WHY, or it reads as a broken model.
 
@@ -692,6 +737,8 @@ def main() -> int:
     test_plate_goes_to_the_tightest_containing_vehicle()
     test_plate_colour_needs_repeated_evidence()
     test_missing_plate_model_does_not_crash()
+    test_sharper_crop_scores_higher()
+    test_vote_prefers_agreement_over_count()
     test_ocr_gate_blocks_hallucinated_reads()
     test_ocr_absence_is_explained()
     print("congestion")

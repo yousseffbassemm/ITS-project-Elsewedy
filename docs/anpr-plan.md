@@ -319,6 +319,64 @@ as one.
 
 ---
 
+## 5b. Multi-frame + super-resolution: built, measured, and its ceiling
+
+`pipeline/plate_ocr.py` implements the full enhancement chain:
+
+    every crop of one vehicle
+      -> score (sharpness 0.5, size 0.35, detector confidence 0.15)
+      -> keep best 3
+      -> Real-ESRGAN x4 (RRDBNet, weights loaded with strict=True)
+      -> OCR each with the Egyptian ALPR model
+      -> confidence-weighted vote (length first, then per position)
+      -> one plate + a confidence
+
+Run with `--enhance`; every intermediate image is written under
+`<job>/plate_stages/track_XXXX/` (raw crop, super-resolved, OCR overlay).
+
+### Measured on 60 real Egyptian plates
+
+Ground truth is the OCR's own read at native resolution (median ~190 px), so this
+measures resolution loss alone rather than model quality. Each plate was degraded
+to **34 px** — this project's actual footage — with sub-pixel offsets to simulate
+separate frames, then super-resolved and read.
+
+| | character accuracy | exact plate match |
+|---|---|---|
+| native ~190 px | 100% (by construction) | 60/60 |
+| 34 px, 1 crop | **14.9%** | **0/60** |
+| 34 px, 3 crops voted | **16.0%** | **0/60** |
+
+Voting is worth about **+1 percentage point**. It is real but tiny, because the
+crops fail in *correlated* ways — the same strokes are missing from every frame,
+so three views agree on the same wrong answer.
+
+### The super-resolution result is the important one
+
+Real-ESRGAN produces a **sharp, confident, plausible-looking plate** from a 34 px
+crop — and the characters it draws are not the ones on the plate. It is trained
+to synthesise realistic detail, so on unreadable input it invents readable-looking
+output. The saved `_1_sr.png` images show this clearly.
+
+Two consequences worth stating plainly:
+
+* Super-resolution **cannot be used as evidence**. A sharp output image is not a
+  read; it is the model doing exactly what it was trained to do.
+* The Egyptian ALPR model was **not fooled** — it returned zero characters on
+  those hallucinated crops rather than reading the invented glyphs. That is the
+  correct behaviour and the reason the pipeline reports nothing instead of
+  inventing plate numbers.
+
+### Verdict
+
+The chain is correct, tested, and worth keeping — on footage that meets the ~100
+px floor it will work, and the best-crop selection genuinely helps there. On this
+camera its ceiling is **0% correct plates**, and no further tuning of selection,
+super-resolution or voting moves that, because the limit is information that was
+never captured.
+
+---
+
 ## 6. Deployment
 
 The stage is already wired to degrade rather than fail: with no weights present,

@@ -67,6 +67,21 @@ class PipelineConfig:
     # Draw the plate box and its colour on the annotated video.
     draw_plates: bool = True
 
+    # --- multi-frame OCR (best-crop -> super-resolution -> vote) -------------------
+    # Keeps the best N views of each vehicle's plate, super-resolves only those,
+    # OCRs each and votes. See pipeline/plate_ocr.py.
+    plate_enhance: bool = False
+    plate_keep_crops: int = 3
+    plate_sr_model: str = "models/RealESRGAN_x4.pth"
+    plate_alpr_model: str = "models/eg_alpr.pt"
+    # Super-resolution multiplies effective width by 4, so a 25px plate becomes
+    # 100px. Whether that is a genuine read or an upscaling artefact is exactly
+    # what the cross-crop vote is there to test, so the floor applied to the
+    # ENHANCED pipeline is on the raw crop and deliberately low.
+    plate_enhance_min_px: float = 12.0
+    # Write every intermediate image (raw crop, super-resolved, OCR overlay).
+    plate_debug_dir: str = ""
+
     # --- Annotation overlay -------------------------------------------------------
     # The counting line and its IN/OUT tag are an internal reference: counting
     # still happens, and in/out totals are still reported in analytics.json and on

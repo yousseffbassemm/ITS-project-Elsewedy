@@ -155,7 +155,20 @@ def process_video(
 
     # Plate stage. Optional and self-contained: if the weights are missing it
     # records why and every other analytic is unaffected.
-    plates = (PlateReader(cfg.plate_model, min_px_for_ocr=cfg.plate_ocr_min_px)
+    enhancer = None
+    if cfg.plates and cfg.plate_enhance:
+        from .plate_ocr import EgyptianPlateOCR, PlateEnhancer, SuperResolver
+        sr = SuperResolver(cfg.plate_sr_model)
+        ocr_engine = EgyptianPlateOCR(cfg.plate_alpr_model)
+        enhancer = PlateEnhancer(
+            sr=sr, ocr=ocr_engine, keep=cfg.plate_keep_crops,
+            debug_dir=(cfg.plate_debug_dir or str(out / "plate_stages")),
+            min_px=cfg.plate_enhance_min_px)
+        print(f"[plates] super-resolution: {sr.mode}"
+              f"{'' if not sr.error else ' — ' + sr.error}")
+        print(f"[plates] OCR: {'loaded' if ocr_engine.model else ocr_engine.error}")
+    plates = (PlateReader(cfg.plate_model, min_px_for_ocr=cfg.plate_ocr_min_px,
+                          enhancer=enhancer)
               if cfg.plates else None)
 
     # Colour by TRACK, not by class. supervision's default is ColorLookup.CLASS,
@@ -399,6 +412,10 @@ def main():
     ap.add_argument("--plates", action="store_true",
                     help="enable the licence-plate stage (detection + colour)")
     ap.add_argument("--plate-model", default=None)
+    ap.add_argument("--enhance", action="store_true",
+                    help="best-crop selection + super-resolution + voted OCR")
+    ap.add_argument("--keep-crops", type=int, default=None)
+    ap.add_argument("--plate-debug-dir", default=None)
     args = ap.parse_args()
 
     cfg = PipelineConfig()
@@ -419,6 +436,13 @@ def main():
         cfg.plates = True
     if args.plate_model:
         cfg.plate_model = args.plate_model
+    if args.enhance:
+        cfg.plates = True
+        cfg.plate_enhance = True
+    if args.keep_crops:
+        cfg.plate_keep_crops = args.keep_crops
+    if args.plate_debug_dir:
+        cfg.plate_debug_dir = args.plate_debug_dir
 
     def cb(pct, msg):
         print(f"[{pct:5.1f}%] {msg}", flush=True)

@@ -33,11 +33,9 @@ from pipeline.plates import COLOR_DISPLAY, MIN_PX_FOR_OCR  # noqa: E402
 # Arabic name of each plate category, so the table is readable to the people who
 # actually operate Egyptian traffic systems.
 COLOR_ARABIC = {
-    "light_blue": "ملاكي",       # private
+    "blue": "ملاكي",             # private ("malaky")
     "red": "نقل",                # haulage / truck
     "orange": "تاكسي",           # taxi
-    "brown": "تجاري",            # commercial
-    "dark_blue": "شرطة",         # police
     "green": "دبلوماسي",          # diplomatic
     "yellow": "جمارك",           # customs
     "white": "",
@@ -48,7 +46,8 @@ FIELDS = [
     "vehicle_no", "track_id", "vehicle_class", "vehicle_class_name",
     "plate_color", "plate_category", "plate_category_ar", "supports_classes",
     "agrees_with_class", "plate_width_px", "plate_text",
-    "plate_text_confidence", "ocr_status", "lane", "speed_kmh",
+    "plate_text_confidence", "ocr_status", "crops_used", "reads_agreeing",
+    "lane", "speed_kmh",
 ]
 
 
@@ -105,7 +104,10 @@ def rows_from(analytics: dict) -> list[dict]:
             "plate_width_px": round(px, 1),
             "plate_text": text or "",
             "plate_text_confidence": v.get("plate_text_confidence") or "",
-            "ocr_status": ocr_status(px, text, ocr_attempted),
+            "ocr_status": ocr_status(px, text, ocr_attempted or bool(v.get("enhance"))),
+            "crops_used": (v.get("enhance") or {}).get("crops_kept", ""),
+            "reads_agreeing": ((v.get("enhance") or {}).get("vote") or {})
+                              .get("reads_at_best_length", ""),
             "lane": v.get("lane", ""),
             "speed_kmh": speeds.get(tid, ""),
         })
