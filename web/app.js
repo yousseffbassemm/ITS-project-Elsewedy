@@ -27,11 +27,16 @@
     // congestion chart grew past the footer. Honour the .chart-box height.
     Chart.defaults.responsive = true;
     Chart.defaults.maintainAspectRatio = false;
-    Chart.defaults.animation = { duration: 700, easing: 'easeOutQuart' };
-    Chart.defaults.plugins.tooltip = Object.assign(Chart.defaults.plugins.tooltip || {}, {
-      backgroundColor: 'rgba(20,22,26,.92)', padding: 10, cornerRadius: 8,
-      titleFont: { weight: '600' }, displayColors: false,
-    });
+    // Mutate the animation defaults, do NOT replace the object. Assigning a fresh
+    // {duration,easing} wipes Chart.js's internal per-property animation registry
+    // and throws "this._fn is not a function" on the next animation tick — which
+    // on resize left canvases mis-sized and could overflow the page.
+    Chart.defaults.animation.duration = 700;
+    Chart.defaults.animation.easing = 'easeOutQuart';
+    Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(20,22,26,.92)';
+    Chart.defaults.plugins.tooltip.padding = 10;
+    Chart.defaults.plugins.tooltip.cornerRadius = 8;
+    Chart.defaults.plugins.tooltip.displayColors = false;
   }
 
   if (!jobId) { document.getElementById('loading').innerHTML = '<p>No job specified.</p>'; return; }
@@ -144,6 +149,26 @@
       'the assumption. Classes <code>C</code> (light truck) &amp; <code>V</code> (van) need a model ' +
       'fine-tuned on the 7-class scheme; v1 maps to the nearest reliable class.</div>';
 
+    // ---- congestion timeline (rendered FIRST, before any Chart.js chart) ----
+    // A state ribbon, not a bar chart: congestion is a categorical state over
+    // time (status ramp Free-flow -> Jam), so encoding severity as bar HEIGHT
+    // made 98% Free-flow read as a flat green block with one confusing spike.
+    //
+    // Rendered before the charts on purpose. It is pure HTML/CSS and cannot fail
+    // from a Chart.js problem; putting it first means a chart error can never
+    // leave the congestion timeline blank.
+    const ts = a.timeseries;
+    congestionRibbon(ts.t_sec, ts.congestion_level);
+    const pct = cg.levels_pct || {};
+    document.getElementById('congestionSummary').innerHTML =
+      '<div class="ribbon-legend">' +
+      LEVELS.map(l => `<span class="badge ${LEVEL_CLASS[l]}">${l}<b>${pct[l] || 0}%</b></span>`).join('') +
+      '</div>' +
+      (cg.peak_periods && cg.peak_periods.length
+        ? `<div class="tag" style="margin-top:12px">⚠ Peak congestion: ` +
+          cg.peak_periods.map(p => `${p.start_sec}–${p.end_sec}s (${p.level})`).join(', ') + '</div>'
+        : '');
+
     // ---- vehicle mix doughnut ----
     const mix = c.by_class || {};
     const mixLabels = Object.keys(mix), mixVals = Object.values(mix);
@@ -189,7 +214,6 @@
     }
 
     // ---- volume over time ----
-    const ts = a.timeseries;
     line('volumeChart', ts.t_sec.map(s => s + 's'), ts.vehicle_count, 'Vehicles', COL.red, COL.redSoft);
 
     // ---- speed histogram ----
@@ -206,22 +230,6 @@
       allClasses.map(k => (dir.in || {})[k] || 0),
       allClasses.map(k => (dir.out || {})[k] || 0));
 
-    // ---- congestion timeline ----
-    // A state ribbon, not a bar chart. Congestion is a categorical state over
-    // time (a status ramp Free-flow -> Jam); encoding severity as bar HEIGHT
-    // made 98% Free-flow read as a flat green block with one confusing spike.
-    // A horizontal ribbon of coloured segments is the correct form and reads at
-    // a glance.
-    congestionRibbon(ts.t_sec, ts.congestion_level);
-    const pct = cg.levels_pct || {};
-    document.getElementById('congestionSummary').innerHTML =
-      '<div class="ribbon-legend">' +
-      LEVELS.map(l => `<span class="badge ${LEVEL_CLASS[l]}">${l}<b>${pct[l] || 0}%</b></span>`).join('') +
-      '</div>' +
-      (cg.peak_periods && cg.peak_periods.length
-        ? `<div class="tag" style="margin-top:12px">⚠ Peak congestion: ` +
-          cg.peak_periods.map(p => `${p.start_sec}–${p.end_sec}s (${p.level})`).join(', ') + '</div>'
-        : '');
   }
 
   // Build the congestion state ribbon: one flex row of coloured segments sized
