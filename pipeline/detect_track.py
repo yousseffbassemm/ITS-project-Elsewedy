@@ -110,6 +110,10 @@ class VehicleDetector:
         # cannot hide the failure by producing fewer tracks to inspect.
         self.raw_detections = 0
         self.confirmed_detections = 0
+        # Detections surviving the ROI gate. The ROI is a MEASURED polygon for one
+        # specific camera, so on any other footage it can sit off the road and
+        # silently discard most of the traffic.
+        self.roi_kept = 0
         self._roi_mask = None
         if cfg.roi_gated_tracking and frame_size is not None:
             w, h = frame_size
@@ -156,6 +160,7 @@ class VehicleDetector:
         # the analysed carriageway.
         if len(det):
             det = det[self._on_roadway(det)]
+        self.roi_kept += len(det)
         if self.stabilizer is not None and len(det):
             det.tracker_id = self.stabilizer.assign(
                 frame, det.xyxy, det.tracker_id, det.class_id, frame_idx
@@ -192,6 +197,19 @@ class VehicleDetector:
         """
         return (self.confirmed_detections / self.raw_detections
                 if self.raw_detections else 1.0)
+
+    @property
+    def roi_pass_rate(self) -> float:
+        """Fraction of tracked detections that fell on the analysed carriageway.
+
+        A low rate means the ROI polygon in the config does not match this
+        video. Every scene-specific value (roi, counting line, lane dividers,
+        speed homography) was measured for samples/street_egypt.mp4, and the web
+        app applies them unchanged to whatever is uploaded — so this is the
+        normal case for any other clip, not an exotic failure.
+        """
+        return (self.roi_kept / self.confirmed_detections
+                if self.confirmed_detections else 1.0)
 
     def display_id(self, tracker_id: int) -> int | None:
         """Sequential on-screen number for a vehicle (see IdStabilizer)."""

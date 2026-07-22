@@ -136,7 +136,16 @@ def process_video(
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
     stride = max(cfg.frame_stride, 1)
-    out_fps = fps / stride
+    # Encode at the SOURCE frame rate and hold each processed frame for `stride`
+    # frames, rather than encoding at fps/stride.
+    #
+    # Both give a real-time video, but fps/stride produces a container with an
+    # odd, very low frame rate — stride 6 on 25 fps footage gave a 4.17 fps file,
+    # which browsers play badly and which looks broken rather than merely coarse.
+    # Repeating frames costs almost nothing: H.264 encodes an identical frame as
+    # a skip, so the file barely grows.
+    out_fps = fps
+    frame_repeat = stride
 
     detector = VehicleDetector(cfg, fps, frame_size=(w, h))
     lane_model = LaneModel(cfg, w, h)
@@ -193,6 +202,7 @@ def process_video(
     if progress_cb:
         progress_cb(0.0, "starting")
 
+    seen_tracks: set[int] = set()
     frame_idx = 0
     processed = 0
     t_sec = 0.0          # last processed timestamp; stays 0 if the video has no frames
@@ -223,6 +233,8 @@ def process_video(
                 # detection is wrong here.
                 if plates is not None:
                     plates.observe_frame(frame, det, imgsz=cfg.plate_imgsz)
+            if det.tracker_id is not None:
+                seen_tracks.update(int(t) for t in det.tracker_id)
             counter.update(det)
             speeds = speed.update(det, frame_idx)
             avg_speed = speed.frame_avg()
@@ -258,7 +270,8 @@ def process_video(
                 _draw_counting_line(frame, counter)
             _draw_hud(frame, counter, level, avg_speed, t_sec, cfg.calibrated,
                       cfg.draw_in_out_hud)
-            writer.write(frame)
+            for _ in range(frame_repeat):
+                writer.write(frame)
 
             processed += 1
             frame_idx += 1
@@ -310,6 +323,42 @@ def process_video(
                        "tracking is healthy at this stride.")
     if stride_health != "OK":
         print(f"[WARNING] frame_stride={stride}: {stride_note}", flush=True)
+
+    # Calibration guard. Every scene-specific value — counting line, ROI, lane
+    # dividers, speed homography — was MEASURED for samples/street_egypt.mp4, and
+    # the web app applies them unchanged to whatever gets uploaded. On any other
+    # camera the line can sit off the carriageway entirely, and the run then
+    # reports a small number confidently instead of failing.
+    #
+    # The symptom used is: vehicles tracked ON the analysed carriageway that
+    # never cross the counting line. Those are already inside the ROI, so if most
+    # of them never reach the line, the line is in the wrong place.
+    #
+    # A low ROI pass rate is deliberately NOT used, even though it looks like the
+    # obvious signal. This camera also sees the opposite carriageway and the ROI
+    # gate exists to discard it — config.py records 99 of 126 ids belonging to
+    # traffic that is not analysed. On the calibrated clip the pass rate is 18%,
+    # so an ROI-based check flags the one video that is known to be correct.
+    roi_rate = detector.roi_pass_rate
+    tracked = len(seen_tracks)
+    counted = counter.total_vehicles()
+    cross_rate = counted / tracked if tracked else 1.0
+    calib_problems = []
+    if tracked >= 8 and cross_rate < 0.35:
+        calib_problems.append(
+            f"{tracked} vehicles were tracked but only {counted} crossed the "
+            "counting line — line_start/line_end do not span this camera's road")
+    calibration_health = "OK" if not calib_problems else "MISMATCHED"
+    calibration_note = ("scene geometry looks consistent with this video"
+                        if not calib_problems else
+                        "; ".join(calib_problems) +
+                        ". The counting line, ROI, lanes and speed calibration in "
+                        "pipeline/config.py were measured for street_egypt.mp4. "
+                        "Counts, lanes and speeds are NOT reliable for this clip "
+                        "until they are re-calibrated — see README "
+                        "'Calibrating for a real scene'.")
+    if calib_problems:
+        print(f"[WARNING] calibration: {calibration_note}", flush=True)
 
     if processed == 0:
         raise RuntimeError(
@@ -419,6 +468,13 @@ def process_video(
         "peak_traffic_second": peak_sec,
         "calibration": {
             "calibrated": cfg.calibrated,
+            # Whether the scene geometry actually fits THIS video, as opposed to
+            # the clip it was measured on.
+            "health": calibration_health,
+            "health_note": calibration_note,
+            "roi_pass_rate": round(roi_rate, 3),
+            "vehicles_tracked": tracked,
+            "vehicles_crossed_line": counted,
             "note": ("Speeds are calibrated." if cfg.calibrated else
                      "Speeds are ESTIMATES using default road geometry. Provide "
                      "source_points + target_size_m to calibrate."),

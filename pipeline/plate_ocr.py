@@ -307,10 +307,11 @@ class PlateEnhancer:
         h, w = plate_img.shape[:2]
         if w < 8 or h < 4:
             return
-        sc = crop_score(conf, sharpness(plate_img), w)
+        sharp = sharpness(plate_img)
+        sc = crop_score(conf, sharp, w)
         keep = self._best[int(tid)]
         keep.append({"score": sc, "img": plate_img.copy(), "conf": float(conf),
-                     "sharp": sharpness(plate_img), "w": w, "h": h,
+                     "sharp": sharp, "w": w, "h": h,
                      "seq": self._seq})
         self._seq += 1
         keep.sort(key=lambda d: -d["score"])

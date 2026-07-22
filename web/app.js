@@ -35,6 +35,14 @@
         '<p>' + err.message + '</p><a class="btn secondary" href="/">Back</a>';
     });
 
+  // Warning text comes from the pipeline and is interpolated into innerHTML, so
+  // escape it. It can contain a filename, and a filename is user-supplied.
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
   function render(a) {
     document.getElementById('loading').classList.add('hidden');
     document.getElementById('content').classList.remove('hidden');
@@ -99,7 +107,24 @@
         `<b>${tr.duplicate_merges || 0}</b> duplicate detections collapsed — so a car that ` +
         `disappears behind a truck keeps its original ID instead of being counted twice.`
       : 'Stable IDs are disabled; a vehicle lost to occlusion may be counted twice.';
-    document.getElementById('calNote').innerHTML =
+    // A calibration mismatch has to be impossible to miss: the counts, lanes and
+    // speeds below are all wrong when it fires, and a small confident number is
+    // more damaging than a visible error.
+    const cal = a.calibration || {};
+    const health = (cal.health === 'MISMATCHED')
+      ? '<div class="note" style="border-left:4px solid #e4002b;background:rgba(228,0,43,.08);">' +
+        '<b>⚠ Scene calibration does not match this video.</b><br>' +
+        escapeHtml(cal.health_note || '') +
+        '<br><br><b>The vehicle count, lane analytics and speeds on this page are ' +
+        'not reliable for this clip.</b></div>'
+      : '';
+    const strideWarn = (a.tracking && a.tracking.stride_health &&
+                        a.tracking.stride_health !== 'OK')
+      ? '<div class="note" style="border-left:4px solid #ff7a3d;background:rgba(255,122,61,.08);">' +
+        '<b>⚠ Frame stride too coarse.</b><br>' +
+        escapeHtml(a.tracking.stride_note || '') + '</div>'
+      : '';
+    document.getElementById('calNote').innerHTML = health + strideWarn +
       '<div class="note">' + trBits + '<br><br>' +
       'Lane boundaries are measured from the painted stripes, not estimated: a median-background ' +
       'fit recovers each line, and the road plane is rectified so the dash pitch comes out constant ' +
