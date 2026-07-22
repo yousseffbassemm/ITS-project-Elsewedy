@@ -47,6 +47,16 @@ VIDEO_MIME = {
 app = FastAPI(title="ITS Traffic Analytics — Elsewedy")
 
 
+@app.on_event("startup")
+def _reap_interrupted_jobs():
+    # A previous server that was killed leaves jobs stuck at "queued"/"processing"
+    # on disk; without this the UI polls them forever. Turn them into a clear
+    # error so the page stops spinning and asks for a re-upload.
+    n = store.reconcile_startup()
+    if n:
+        print(f"[startup] marked {n} interrupted job(s) as failed", flush=True)
+
+
 @app.middleware("http")
 async def no_cache(request: Request, call_next):
     resp = await call_next(request)

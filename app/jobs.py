@@ -125,6 +125,37 @@ class JobStore:
     def submit(self, job: Job, input_path: Path, cfg: PipelineConfig) -> None:
         _executor.submit(self._run, job, input_path, cfg)
 
+    def reconcile_startup(self) -> int:
+        """Mark jobs left mid-flight by a previous process as failed.
+
+        A job.json on disk that says 'queued' or 'processing' but has no live
+        worker — because the server was killed or restarted — would otherwise be
+        polled by the UI forever, showing 0% queued with nothing behind it. This
+        is exactly what a hard restart produces. On startup, turn those into a
+        clear error the page can display and stop polling, rather than a
+        permanent spinner.
+
+        A job is only stale if it did NOT finish: presence of analytics.json
+        means it completed before the restart and must be left alone.
+        """
+        fixed = 0
+        for jf in DATA_DIR.glob("*/job.json"):
+            try:
+                data = json.loads(jf.read_text())
+            except (ValueError, OSError):
+                continue
+            if data.get("status") in ("queued", "processing") and \
+                    not (jf.parent / "analytics.json").exists():
+                data["status"] = "error"
+                data["message"] = "interrupted"
+                data["error"] = ("This job was interrupted when the server "
+                                 "restarted. Please upload the video again.")
+                tmp = jf.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(data, indent=2))
+                os.replace(tmp, jf)
+                fixed += 1
+        return fixed
+
     def _run(self, job: Job, input_path: Path, cfg: PipelineConfig) -> None:
         try:
             self._update(job, status="processing", progress=1.0, message="loading model")
