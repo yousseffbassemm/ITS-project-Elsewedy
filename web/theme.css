@@ -61,6 +61,14 @@ a { color: var(--red); text-decoration: none; }
 }
 .topbar .spacer { flex: 1; }
 .tag { color: var(--muted); font-size: 13px; }
+/* On a phone the brand + two buttons overflow the bar and clip. Let it wrap and
+   tighten the padding so nothing is cut off. */
+@media (max-width: 560px) {
+  .topbar { flex-wrap: wrap; gap: 10px; padding: 12px 16px; }
+  .topbar .spacer { flex-basis: 100%; height: 0; order: 1; }
+  .brandbar { order: 0; }
+  .btn { order: 2; padding: 9px 14px; font-size: 13px; }
+}
 
 /* ---- layout ---- */
 /* Fills the screen on laptops/1440p, stays proportioned (no stretched-flat
@@ -152,14 +160,16 @@ a { color: var(--red); text-decoration: none; }
 .kpi.amber::before { background: var(--amber); }
 .kpi.blue::before { background: var(--blue); }
 .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
-.kpi .value { font-size: 32px; font-weight: 800; margin-top: 6px; letter-spacing: -.5px; }
+.kpi .value { font-size: 34px; font-weight: 800; margin-top: 6px; letter-spacing: -.5px;
+  font-variant-numeric: tabular-nums; line-height: 1.1; }
 .kpi .value small { font-size: 15px; color: var(--muted); font-weight: 500; }
 .kpi .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 
 .panels { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; align-items: start; }
 @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
 .card { padding: 20px; }
-.card h3 { margin: 0 0 14px; font-size: 16px; font-weight: 700; }
+.card h3 { margin: 0 0 14px; font-size: 16px; font-weight: 700; display: flex; align-items: baseline;
+  gap: 8px; flex-wrap: wrap; }
 .card .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
 video { width: 100%; border-radius: 12px; background: #0d0f12; display: block; }
 .toggle { display: inline-flex; gap: 6px; margin-bottom: 12px; }
@@ -174,11 +184,39 @@ video { width: 100%; border-radius: 12px; background: #0d0f12; display: block; }
 .chart-box { position: relative; height: 240px; }
 .chart-box.wide { height: 260px; }
 
-.badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 700; }
+.badge { display: inline-flex; align-items: center; gap: 7px; padding: 5px 13px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+.badge b { font-weight: 800; }
 .badge.free { background: rgba(23,178,106,.12); color: #0f7a48; }
 .badge.mod  { background: rgba(247,144,9,.14); color: #b45309; }
 .badge.heavy{ background: rgba(255,122,61,.16); color: #c2410c; }
 .badge.jam  { background: rgba(227,6,19,.12); color: var(--red); }
+
+/* ---- congestion state ribbon ---- */
+.ribbon-wrap { margin: 4px 0 2px; }
+.ribbon {
+  display: flex; height: 44px; border-radius: 10px; overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--line); background: var(--bg-2);
+}
+.ribbon .seg {
+  height: 100%;
+  /* a hairline surface gap between runs so a state change is legible */
+  box-shadow: inset -1px 0 0 rgba(255,255,255,.55);
+  transition: filter .16s var(--ease), transform .16s var(--ease);
+  transform-origin: center;
+  animation: ribbonGrow .6s var(--ease) both;
+}
+.ribbon .seg:last-child { box-shadow: none; }
+.ribbon .seg:hover { filter: brightness(1.08) saturate(1.1); transform: scaleY(1.08); }
+.ribbon .seg.free  { background: linear-gradient(180deg, #22c579, var(--green)); }
+.ribbon .seg.mod   { background: linear-gradient(180deg, #ffb23d, var(--amber)); }
+.ribbon .seg.heavy { background: linear-gradient(180deg, #ff9257, var(--orange)); }
+.ribbon .seg.jam   { background: linear-gradient(180deg, #ff3b48, var(--red)); }
+@keyframes ribbonGrow { from { transform: scaleX(0); opacity: .3; } to { transform: scaleX(1); opacity: 1; } }
+.ribbon-axis {
+  display: flex; justify-content: space-between; margin-top: 7px;
+  color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.ribbon-legend { display: flex; flex-wrap: wrap; gap: 9px; }
 
 /* class-scheme legend chips */
 .legend { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -200,8 +238,36 @@ table.mini td { padding: 7px 4px; border-bottom: 1px solid var(--line); }
 table.mini tr:last-child td { border-bottom: none; font-weight: 700; }
 table.mini td:last-child { text-align: right; color: var(--red); font-weight: 700; }
 
+/* ---- entrance animations ---- */
+/* Each dashboard section fades and lifts into place, staggered top-to-bottom, so
+   the report assembles itself rather than snapping in. Respects the OS
+   reduced-motion setting. */
+@keyframes riseIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+#content > * { animation: riseIn .55s var(--ease) both; }
+#content > *:nth-child(1) { animation-delay: .02s; }
+#content > *:nth-child(2) { animation-delay: .09s; }
+#content > *:nth-child(3) { animation-delay: .16s; }
+#content > *:nth-child(4) { animation-delay: .23s; }
+#content > *:nth-child(5) { animation-delay: .30s; }
+#content > *:nth-child(6) { animation-delay: .37s; }
+#content > *:nth-child(7) { animation-delay: .44s; }
+.kpi { animation: riseIn .5s var(--ease) both; }
+.kpis .kpi:nth-child(1) { animation-delay: .06s; }
+.kpis .kpi:nth-child(2) { animation-delay: .12s; }
+.kpis .kpi:nth-child(3) { animation-delay: .18s; }
+.kpis .kpi:nth-child(4) { animation-delay: .24s; }
+.kpis .kpi:nth-child(5) { animation-delay: .30s; }
+.kpis .kpi:nth-child(6) { animation-delay: .36s; }
+.chip { animation: riseIn .4s var(--ease) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important;
+    transition-duration: .001ms !important; }
+}
+
 @media print {
   .topbar, .toggle, .btn { display: none !important; }
   body { background: #fff; }
   .card, .kpi { box-shadow: none; border-color: var(--line); break-inside: avoid; }
+  #content > *, .kpi, .chip, .ribbon .seg { animation: none !important; }
 }

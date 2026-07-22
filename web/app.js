@@ -15,13 +15,23 @@
   };
   const codeOf = (label) => (label || '').split('·')[0].trim();
   const LEVELS = ['Free-flow', 'Moderate', 'Heavy', 'Jam'];
-  const LEVEL_COLOR = { 'Free-flow': COL.green, 'Moderate': COL.amber, 'Heavy': COL.orange, 'Jam': COL.red };
   const LEVEL_CLASS = { 'Free-flow': 'free', 'Moderate': 'mod', 'Heavy': 'heavy', 'Jam': 'jam' };
 
   if (window.Chart) {
     Chart.defaults.color = COL.text;
     Chart.defaults.font.family = 'Segoe UI, Inter, system-ui, sans-serif';
     Chart.defaults.borderColor = COL.grid;
+    // THE fix for the charts overflowing their cards: Chart.js defaults to
+    // maintainAspectRatio:true, which ignores the container's CSS height and
+    // sizes the canvas to width/2 — on a wide card that is ~800px tall, so the
+    // congestion chart grew past the footer. Honour the .chart-box height.
+    Chart.defaults.responsive = true;
+    Chart.defaults.maintainAspectRatio = false;
+    Chart.defaults.animation = { duration: 700, easing: 'easeOutQuart' };
+    Chart.defaults.plugins.tooltip = Object.assign(Chart.defaults.plugins.tooltip || {}, {
+      backgroundColor: 'rgba(20,22,26,.92)', padding: 10, cornerRadius: 8,
+      titleFont: { weight: '600' }, displayColors: false,
+    });
   }
 
   if (!jobId) { document.getElementById('loading').innerHTML = '<p>No job specified.</p>'; return; }
@@ -197,15 +207,49 @@
       allClasses.map(k => (dir.out || {})[k] || 0));
 
     // ---- congestion timeline ----
-    const levelIdx = ts.congestion_level.map(l => LEVELS.indexOf(l) + 1);
-    congestionBar('congestionChart', ts.t_sec.map(s => s + 's'), levelIdx, ts.congestion_level);
+    // A state ribbon, not a bar chart. Congestion is a categorical state over
+    // time (a status ramp Free-flow -> Jam); encoding severity as bar HEIGHT
+    // made 98% Free-flow read as a flat green block with one confusing spike.
+    // A horizontal ribbon of coloured segments is the correct form and reads at
+    // a glance.
+    congestionRibbon(ts.t_sec, ts.congestion_level);
     const pct = cg.levels_pct || {};
     document.getElementById('congestionSummary').innerHTML =
-      LEVELS.map(l => `<span class="badge ${LEVEL_CLASS[l]}" style="margin-right:8px">${l}: ${pct[l] || 0}%</span>`).join('') +
+      '<div class="ribbon-legend">' +
+      LEVELS.map(l => `<span class="badge ${LEVEL_CLASS[l]}">${l}<b>${pct[l] || 0}%</b></span>`).join('') +
+      '</div>' +
       (cg.peak_periods && cg.peak_periods.length
-        ? `<div class="tag" style="margin-top:10px">Peak congestion periods: ` +
+        ? `<div class="tag" style="margin-top:12px">⚠ Peak congestion: ` +
           cg.peak_periods.map(p => `${p.start_sec}–${p.end_sec}s (${p.level})`).join(', ') + '</div>'
         : '');
+  }
+
+  // Build the congestion state ribbon: one flex row of coloured segments sized
+  // by how long each state ran, with time ticks below. Adjacent same-state
+  // seconds are merged into one run so the DOM stays small and the segment
+  // boundaries mean something (a state change), not an arbitrary 1s grid.
+  function congestionRibbon(tSec, levels) {
+    const host = document.getElementById('congestionRibbon');
+    if (!host || !levels || !levels.length) return;
+    const runs = [];
+    for (let i = 0; i < levels.length; i++) {
+      const last = runs[runs.length - 1];
+      if (last && last.level === levels[i]) last.end = tSec[i];
+      else runs.push({ level: levels[i], start: tSec[i], end: tSec[i] });
+    }
+    const total = (tSec[tSec.length - 1] - tSec[0]) || 1;
+    const seg = runs.map(r => {
+      const w = Math.max(((r.end - r.start + 1) / (total + 1)) * 100, 0.4);
+      return `<div class="seg ${LEVEL_CLASS[r.level]}" style="width:${w}%"
+        title="${r.level}: ${r.start}s–${r.end}s"></div>`;
+    }).join('');
+    // A handful of evenly spaced time ticks — not one per second, which collided.
+    const nTicks = 8, ticks = [];
+    for (let k = 0; k <= nTicks; k++) {
+      ticks.push(`<span>${Math.round(tSec[0] + (total * k / nTicks))}s</span>`);
+    }
+    host.innerHTML = `<div class="ribbon">${seg}</div>
+      <div class="ribbon-axis">${ticks.join('')}</div>`;
   }
 
   function worstCls(l) { return { 'Free-flow': 'green', 'Moderate': 'amber', 'Heavy': 'amber', 'Jam': 'red' }[l] || 'ink'; }
@@ -245,16 +289,6 @@
         { label: 'In', data: inData, backgroundColor: COL.red, borderRadius: 5 },
         { label: 'Out', data: outData, backgroundColor: COL.ink, borderRadius: 5 } ] },
       options: { plugins: { legend: { position: 'bottom' } }, scales: { x: noGrid, y: yGrid } } });
-  }
-  function congestionBar(id, labels, idxData, levels) {
-    new Chart(el(id), { type: 'bar',
-      data: { labels, datasets: [{ data: idxData,
-        backgroundColor: levels.map(l => LEVEL_COLOR[l] || COL.green), borderRadius: 2,
-        barPercentage: 1, categoryPercentage: 1 }] },
-      options: { plugins: { legend: { display: false },
-        tooltip: { callbacks: { label: ctx => levels[ctx.dataIndex] } } },
-        scales: { x: noGrid, y: { min: 0, max: 4, ticks: { stepSize: 1,
-          callback: v => LEVELS[v - 1] || '' }, grid: { color: COL.grid } } } } });
   }
   function empty(id, msg) { el(id).parentElement.innerHTML = `<p class="tag">${msg}</p>`; }
   function el(id) { return document.getElementById(id); }
