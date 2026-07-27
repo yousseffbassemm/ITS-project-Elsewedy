@@ -82,23 +82,70 @@ The recommended alternative, not yet built: a **learned embedding over the whole
 vehicle** (≈25× more pixels than the plate), standard vehicle re-ID, public
 datasets, trains on Colab.
 
-### The 7-class classifier works and is wired in
+### Vehicle class: the answer is a HYBRID, not a better model
 
-`ITS_VEHICLE_CLS=models/vehicle_cls.pt`. Measured on 68 hand-labelled vehicles
-from the deployment camera, against the old size heuristic:
+`ITS_VEHICLE_CLS=models/vehicle_cls.pt` (this is v1 — see below, do not replace
+it with v2). Measured per vehicle on 68 hand-labelled vehicles from the
+deployment camera:
 
-| | heuristic | classifier |
-|---|---|---|
-| A private car | 0.920 | 0.920 |
-| **E bus/microbus** | **0.042** | **0.833** |
-| C light truck | 0.526 | 0.158 |
-| **overall** | **0.500** | **0.676** |
+| | overall | A | C | E |
+|---|---|---|---|---|
+| size heuristic (was shipping) | 0.500 | 0.920 | 0.526 | 0.042 |
+| v1 classifier alone | 0.647 | 0.920 | 0.053 | 0.833 |
+| v2, `lgv`→C, 3× more C data | 0.529 | 0.680 | 0.368 | 0.500 |
+| **HYBRID (shipped)** | **0.765** | 0.920 | 0.474 | 0.833 |
 
-Microbuses are ~⅓ of this road's traffic and COCO cannot express them at all —
-that class alone is the win. **C regressed** because the Gulf dataset's `lgv`
-folder (2,229 light-goods-vehicle images) was wrongly excluded as ambiguous; the
-fix is in `notebooks/vehicle_classes_colab.ipynb` but **v2 has not been trained
-yet** (two runs died — a disconnect and a PC shutdown).
+Two things to take from this.
+
+**Microbuses are the win.** ~⅓ of this road's traffic, and COCO cannot express
+them at all — 0.042 → 0.833.
+
+**More data made it worse, and that is the interesting result.** v1's only real
+weakness was C↔D. The obvious fix — fold the Gulf dataset's `lgv` folder (2,229
+light-goods images) into C and retrain — did lift C (0.053 → 0.368) and cost
+**12 points overall**, because a bigger, broader C started swallowing cars and
+microbuses (`E→C` 10, `A→C` 6). v2 scored **0.93 in-domain**, better-looking than
+its real performance. Do not resurrect it.
+
+What works instead: let each signal make the call it is good at. The classifier
+says *what kind* of vehicle it is; where that lands on C-or-D, the monocular
+frontal-area estimate decides *which*, because a pickup and a lorry look alike
+from behind and differ mainly in size. Implemented in
+`classify.VehicleClassifier.resolve` — 6 lines, and it beats either component.
+
+Caveat: C is only 19 vehicles, so each one moves that column by ~5 points. Treat
+the C figures as directional.
+
+**The live pipeline does NOT reproduce 0.765, and this is unresolved.** Running
+the real pipeline on `street_egypt.mp4` with the hybrid enabled:
+
+| | A | C | D | E |
+|---|---|---|---|---|
+| heuristic only | 11 | 6 | 1 | **0** |
+| hybrid (shipped) | 10 | 5 | 1 | **2** |
+
+E going 0 → 2 is real and is the first time this pipeline has ever reported a
+bus/microbus. But 2 of 18 is well short of what 0.833 on that class implies, and
+**two attempts to close the gap both failed**:
+
+* `vehicle_cls_every=1` (5× the classifier calls) — E stayed at 2
+* `MIN_CLS_CROP_PX=64`, declining on small crops — mix *identical* to baseline
+
+Three quite different configurations all land on E=2. Sampling frequency and
+crop-size filtering are both ruled out. Everything else is unaffected — vehicles,
+speed, lane counts identical across all runs — so the change is correctly
+confined to the class label.
+
+Untested candidates, in the order worth trying: the harvested crops are the
+LARGEST view per vehicle while the pipeline sees the full size distribution; the
+per-track vote may be dominated by a few observations; or the hand-labels
+overcount microbuses among the 18 that actually crossed the line (the 24-microbus
+figure covers all 71 vehicles including the opposite carriageway). The direct
+diagnostic — dump per-observation votes and crop sizes for each of the 18 and
+compare against the labels vehicle by vehicle — has not been run.
+
+Do not quote 0.765 to anyone without that caveat. It is an offline,
+crop-level figure that has not reproduced end to end.
 
 ## 4. Traps that have already bitten
 
@@ -135,7 +182,30 @@ include `carriageway`.
 lambdas, semicolons) with no nested blocks.
 
 **Colab runtimes are reclaimed without warning** and take session storage with
-them. Download trained weights immediately after `model.train()` returns.
+them — this cost three training runs (a disconnect, a PC shutdown, a closed tab)
+before the fix. Do not rely on downloading weights at the end. Mount Drive and
+pass `project='/content/drive/MyDrive/its_models'` to `model.train()`, which
+writes `last.pt` and `best.pt` there every epoch; a disconnect then costs time
+rather than work. Note the training itself survived every one of those three
+losses — only our access to `/content` died.
+
+**More training data is not automatically better.** See §3: tripling class C
+lifted C and cost 12 points overall. Always re-measure the classes you were NOT
+trying to fix.
+
+**An env var read by the web app is not read by the CLI.** `ITS_VEHICLE_CLS` was
+honoured only in `app/main._cfg()`, so
+`ITS_VEHICLE_CLS=... python -m pipeline.process_video` ran the size heuristic,
+printed nothing, and produced a class mix identical to a no-classifier run —
+which looked like "the classifier did not help" rather than "the classifier never
+loaded". Both entry points now agree, and a run always states its class source.
+`ITS_PLATE_OCR_MODEL` had the same defect. Check both when adding a setting.
+
+**Measured dead ends — do not re-try without new evidence.** `classify.py`
+carries the crop-size degradation table (below 64px the classifier answers "G"
+for everything). That table is real, but acting on it via `MIN_CLS_CROP_PX=64`
+changed the live class mix by exactly nothing. The constant is kept because the
+measurement is worth having; the *conclusion drawn from it* was wrong.
 
 ## 5. Architecture notes
 
@@ -169,7 +239,28 @@ plates are legible in them. `.gitignore` blocks `data/dataset/`, `data/plates/`,
 `samples/*.mp4`, `*.pt` and `*_cls.zip`. Never commit them, not even to a private
 repo. Clear Colab outputs and uploaded footage after a training session.
 
-## 7. Current state (end of the 2026-07-26/27 session)
+## 7. Current state (end of the 2026-07-27 session)
+
+**Uncommitted:** `CLAUDE.md`, `pipeline/classify.py`, `pipeline/process_video.py`,
+`tests/test_pipeline.py` — the hybrid C/D deferral, the crop-size floor, the
+`--vehicle-cls` / `--vehicle-cls-every` CLI flags and their tests. 168 checks
+pass. Commit before starting anything new.
+
+**Models on disk** (all gitignored): `models/vehicle_cls_v1.pt` = the shipped
+one, also copied to `models/vehicle_cls.pt`; `models/vehicle_cls_v2.pt` = the
+rejected retrain, kept only as evidence. v2 also lives in the user's Google Drive
+at `MyDrive/its_models/`.
+
+**Latest reports:** `data/jobs/hybrid` (classifier + hybrid, the current best),
+`data/jobs/_verify` (heuristic only, the comparison baseline),
+`data/jobs/hybrid_e1` and `data/jobs/hybrid_min64` (the two failed experiments).
+
+**Known-stale UI text:** `web/app.js` still prints *"Classes C & V need a model
+fine-tuned on the 7-class scheme; v1 maps to the nearest reliable class"* — written
+before the classifier existed. The dashboard now denies using the thing it is
+using. It should name the class source actually in force.
+
+### Previous session
 
 Branch `plates-anpr`, **3 commits ahead of `origin/plates-anpr`, not pushed**
 (`d3a85e5` predates this session; `87196a7` and `8cd0b3c` are its work).
@@ -184,16 +275,27 @@ in (`models/vehicle_cls_v1.pt`).
 Deliverable: `data/jobs/plates_final/plates.csv` — 18 vehicles, colour for 15,
 zero fabricated plate strings, `char_height_px` vs requirement per row.
 
-### Outstanding
+### Outstanding, most useful first
 
-1. **Train v2** — `notebooks/vehicle_classes_colab.ipynb`, T4, Run all (~45 min).
-   Has the `lgv → C` fix; should lift C without costing the E win. Needs the
-   Roboflow key as a Colab secret named `ROBOFLOW_API_KEY`.
-2. **Re-run the pipeline with `ITS_VEHICLE_CLS`** set, and confirm the dashboard's
-   class mix changes as expected (many current "A" should become "E").
-3. **Vehicle re-ID embedding** — the viable answer to cross-camera matching.
-4. Dashboard does not render the `plates` block at all; plate data reaches users
+1. **Why does the live pipeline only find 2 microbuses?** See §3. Two hypotheses
+   already falsified. The untried diagnostic: dump per-observation classifier
+   votes + crop sizes for each of the 18 counted vehicles and compare against
+   `data/dataset/manifest.csv` labels vehicle by vehicle. Do this before any
+   further tuning — the last two changes were guesses and both cost a 15-minute
+   run to disprove.
+2. **Fix the stale dashboard note** in `web/app.js` (see above).
+3. **Decide on `MIN_CLS_CROP_PX`** — measurably does nothing; keep for the
+   documented measurement or revert.
+4. **Vehicle re-ID embedding** — the viable answer to cross-camera matching, and
+   the honest replacement for the plate fingerprint that failed. Whole vehicle,
+   ~25× more pixels than the plate, public datasets (VeRi-776, VehicleID),
+   trains on Colab.
+5. Dashboard does not render the `plates` block at all; plate data reaches users
    only via `analytics.json` and the CSV.
-5. Residual: `#1`/`a2` are the same SUV (0.916 correlation — *lower* than two
-   genuinely different trucks at 0.977, so appearance alone cannot separate them;
-   only timing can). Mild for classification, matters for re-ID.
+6. Residual harvest duplicate: `#1`/`a2` are the same SUV (0.916 correlation —
+   *lower* than two genuinely different trucks at 0.977, so appearance alone
+   cannot separate them; only timing can). Mild for classification, matters for
+   re-ID.
+7. `docs/img/resolution_proof.png` is public on GitHub and shows a legible plate
+   (`3AE 6211`), which contradicts §6. From a stock 4K clip, not Elsewedy
+   footage. Blurring the glyph region would keep the figure's point intact.

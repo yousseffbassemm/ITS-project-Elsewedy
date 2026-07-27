@@ -173,6 +173,14 @@ def process_video(
         print(f"[classes] crop classifier: "
               f"{'loaded ' + cfg.vehicle_cls_model if crop_clf.model else crop_clf.error}",
               flush=True)
+    else:
+        # Say so. A run that silently used the weaker class source and reported
+        # its numbers as the model's is exactly how an hour gets lost: the CLI
+        # did not read ITS_VEHICLE_CLS, produced no warning, and the class mix
+        # came out identical to the heuristic with nothing to explain it.
+        print("[classes] no crop classifier — using the COCO size heuristic, "
+              "which cannot express C or V and has no microbus concept. "
+              "Set --vehicle-cls or ITS_VEHICLE_CLS.", flush=True)
     classifier = VehicleClassifier(speed.transformer, detector.native_codes,
                                    crop_classifier=crop_clf,
                                    crop_every=cfg.vehicle_cls_every)
@@ -539,6 +547,12 @@ def main():
     ap.add_argument("--conf", type=float, default=None)
     ap.add_argument("--stride", type=int, default=None)
     ap.add_argument("--config", default=None, help="optional JSON config file")
+    ap.add_argument("--vehicle-cls", default=None,
+                    help="second-stage 7-class crop classifier weights "
+                         "(defaults to $ITS_VEHICLE_CLS)")
+    ap.add_argument("--vehicle-cls-every", type=int, default=None,
+                    help="run the crop classifier on every Nth observation of "
+                         "a track (default 5; 1 = every frame, slower)")
     ap.add_argument("--plates", action="store_true",
                     help="enable the licence-plate stage (detection + colour)")
     ap.add_argument("--plate-model", default=None)
@@ -567,6 +581,14 @@ def main():
         cfg.frame_stride = args.stride
     if args.plates:
         cfg.plates = True
+    # The CLI honours the same env vars the web app does. Without this,
+    # `ITS_VEHICLE_CLS=... python -m pipeline.process_video` looked like it
+    # worked and silently ran the size heuristic instead.
+    cfg.vehicle_cls_model = (args.vehicle_cls
+                             or os.getenv("ITS_VEHICLE_CLS")
+                             or cfg.vehicle_cls_model)
+    if args.vehicle_cls_every:
+        cfg.vehicle_cls_every = args.vehicle_cls_every
     if args.plate_model:
         cfg.plate_model = args.plate_model
     if args.plate_ocr_model:

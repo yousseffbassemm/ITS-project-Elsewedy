@@ -20,7 +20,9 @@ import supervision as sv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.classify import VehicleClassifier, native_code_map   # noqa: E402
+from pipeline.classify import (                          # noqa: E402
+    MIN_SIZE_SAMPLES, VehicleClassifier, native_code_map,
+)
 from pipeline.config import (                            # noqa: E402
     COCO_SCHEME, UNGROUPED, PipelineConfig, scheme_for_codes,
 )
@@ -600,6 +602,92 @@ def test_crop_classifier_overrides_the_size_heuristic():
           c3.resolve(7) == "A", f"got {c3.resolve(7)}")
 
 
+def test_classifier_declines_on_crops_too_small_to_judge():
+    """Below ~64px the classifier does not degrade gracefully — it says 'G'.
+
+    Measured on 51 counted vehicles from the deployment camera, one prediction
+    per crop: as the crop shrinks 128 -> 24 px, predictions of G climb 4 -> 25
+    while E drains 10 -> 1. A small blurred blob looks like a motorcycle.
+
+    That matters because the pipeline classifies a vehicle at EVERY distance it
+    is tracked, so far-field observations were voting confidently for motorcycle
+    and washing out microbus evidence gathered up close. Declining is strictly
+    better than guessing: the size heuristic still runs underneath.
+    """
+    from pipeline.classify import MIN_CLS_CROP_PX, CropClassifier
+    c = CropClassifier.__new__(CropClassifier)
+    c.model, c.names, c.imgsz, c.device = object(), {0: "A"}, 128, "cpu"
+    c.min_px = MIN_CLS_CROP_PX
+    tiny = np.zeros((32, 32, 3), np.uint8)
+    check("a 32px crop gets no opinion", c.predict(tiny) is None)
+    check("the floor is at least 48px", MIN_CLS_CROP_PX >= 48,
+          f"got {MIN_CLS_CROP_PX}")
+
+    # A vehicle only ever seen small must fall through to the heuristic rather
+    # than be left unclassified — declining is not the same as failing.
+    class _AlwaysDeclines:
+        model = True
+
+        def predict(self, crop):
+            return None                        # every crop was below the floor
+
+    frame = np.zeros((H, W, 3), dtype=np.uint8)
+    v = VehicleClassifier(None, None, crop_classifier=_AlwaysDeclines(),
+                          crop_every=1)
+    v.observe(3, 2, [10.0, 10.0, 40.0, 40.0], conf=0.9, frame=frame)
+    check("a vehicle never seen large still gets a class",
+          v.resolve(3) == "A", f"got {v.resolve(3)}")
+
+
+def test_c_d_boundary_defers_to_the_size_heuristic():
+    """The classifier says WHAT it is; frontal area says light or heavy.
+
+    A pickup and a lorry look alike from behind at this scale and differ mainly
+    in SIZE, which a crop classifier cannot see. Measured per vehicle on the
+    deployment camera: the classifier scored 0.053 on C where the size
+    heuristic scored 0.526. Letting each signal make the call it is good at
+    beats either alone — 0.765 against 0.647 (classifier) and 0.500 (heuristic).
+
+    Retraining C on 3x more data was tried first and was WORSE overall (0.529):
+    the extra light-goods images made C broad enough to swallow cars and
+    microbuses (E->C 10, A->C 6). More data fixed the symptom and cost two
+    working classes.
+    """
+    class _Fake:
+        model = True
+
+        def __init__(self, code):
+            self.code = code
+
+        def predict(self, crop):
+            return (self.code, 0.9)
+
+    sp = SpeedEstimator(CFG, W, H, FPS, 1)
+    frame = np.zeros((H, W, 3), dtype=np.uint8)
+
+    def resolve_with(code, box):
+        c = VehicleClassifier(sp.transformer, None,
+                             crop_classifier=_Fake(code), crop_every=1)
+        for _ in range(MIN_SIZE_SAMPLES + 1):
+            c.observe(1, 7, box, conf=0.9, frame=frame)
+        return c.resolve(1)
+
+    # A lorry-sized box in the near field, and a pickup-sized one.
+    ppm = VehicleClassifier(sp.transformer)._px_per_metre(640.0, 0.85 * H)
+    big = [600.0, 0.85 * H - 3.6 * ppm, 600.0 + 3.0 * ppm, 0.85 * H]
+    small = [600.0, 0.85 * H - 2.0 * ppm, 600.0 + 1.9 * ppm, 0.85 * H]
+
+    check("classifier says C but it is lorry-sized -> D",
+          resolve_with("C", big) == "D", f"got {resolve_with('C', big)}")
+    check("classifier says D but it is pickup-sized -> C",
+          resolve_with("D", small) == "C", f"got {resolve_with('D', small)}")
+    # Everything off that boundary is left alone — this is not a general veto.
+    check("a microbus is not second-guessed",
+          resolve_with("E", big) == "E", f"got {resolve_with('E', big)}")
+    check("a private car is not second-guessed",
+          resolve_with("A", small) == "A", f"got {resolve_with('A', small)}")
+
+
 def test_vans_are_not_guessed():
     """Vans are reported as A rather than guessed, by design.
 
@@ -1127,6 +1215,8 @@ def main() -> int:
     test_class_vote_prefers_near_field_evidence()
     test_near_field_views_outweigh_distant_ones()
     test_crop_classifier_overrides_the_size_heuristic()
+    test_classifier_declines_on_crops_too_small_to_judge()
+    test_c_d_boundary_defers_to_the_size_heuristic()
     test_vans_are_not_guessed()
     test_finetuned_model_is_detected_and_takes_over()
     test_finetuned_model_works_downstream_not_just_in_classify()

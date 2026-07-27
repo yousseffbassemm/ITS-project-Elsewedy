@@ -83,6 +83,25 @@ MIN_SIZE_SAMPLES = 4
 # size test, which is what it is actually for.
 EVIDENCE_REF_PX = 100.0
 
+# Smallest vehicle crop the second-stage classifier is allowed an opinion on.
+# Below this it does not merely get less accurate — it fails in one specific
+# direction: a small blurred blob looks like a motorcycle. Measured on 51
+# counted vehicles from the deployment camera, one prediction per crop:
+#
+#     crop px   accuracy   predicted mix
+#        128      0.569    A 26  C 3  D 12  E 10
+#         64      0.451    A 27        D 14  E  6  G  4
+#         32      0.333    A 22        D  5  E  4  G 20
+#         24      0.196    A 19        D  6  E  1  G 25
+#
+# G climbs 4 -> 20 -> 25 while E drains 10 -> 4 -> 1. Since the pipeline
+# classifies a vehicle at every distance it is tracked, those far-field
+# observations were voting confidently for motorcycle and washing out the
+# microbus evidence gathered up close. Declining to answer is strictly better:
+# the size heuristic still runs, and a vehicle never seen large simply keeps
+# the heuristic's label.
+MIN_CLS_CROP_PX = 64
+
 
 def display_name(code: str) -> str:
     return MENTOR_CLASSES.get(code, ("Unknown", ""))[0]
@@ -153,10 +172,11 @@ class CropClassifier:
     analytics do not depend on this and must not be lost to it.
     """
 
-    def __init__(self, weights: str, device: str = "cpu", imgsz: int = 128):
+    def __init__(self, weights: str, device: str = "cpu", imgsz: int = 128,
+                 min_px: int = MIN_CLS_CROP_PX):
         self.model = None
         self.error: str | None = None
-        self.imgsz, self.device = imgsz, device
+        self.imgsz, self.device, self.min_px = imgsz, device, min_px
         self.names: dict[int, str] = {}
         try:
             from pathlib import Path
@@ -180,8 +200,8 @@ class CropClassifier:
         if self.model is None or crop is None or crop.size == 0:
             return None
         h, w = crop.shape[:2]
-        if w < 16 or h < 16:
-            return None                            # too small to be evidence
+        if w < self.min_px or h < self.min_px:
+            return None                            # see MIN_CLS_CROP_PX
         try:
             r = self.model.predict(crop, imgsz=self.imgsz, verbose=False,
                                    device=self.device)[0]
@@ -290,6 +310,27 @@ class VehicleClassifier:
         code_votes = self._code_votes.get(tid)
         if code_votes:
             best = max(code_votes, key=code_votes.get)
+            # HYBRID on the C/D boundary. The classifier is excellent at telling
+            # a car from a microbus from a truck, and bad at telling a LIGHT
+            # truck from a HEAVY one — measured per vehicle on the deployment
+            # camera, C scored 0.053 against the size heuristic's 0.526, because
+            # a pickup and a lorry look alike from behind at this scale and
+            # differ mainly in SIZE, which a crop classifier cannot see.
+            #
+            # So each signal makes the call it is good at: the model says what
+            # kind of vehicle it is, and where that lands on C-or-D the
+            # frontal-area estimate decides which. Measured on 68 vehicles:
+            #
+            #     size heuristic  0.500      v1 classifier  0.647
+            #     HYBRID          0.765
+            #
+            # Retraining C on more data was tried instead and was worse (0.529):
+            # the extra light-goods images made C broad enough to start
+            # swallowing cars and microbuses. See CLAUDE.md.
+            if best in ("C", "D"):
+                h_m, w_m = self.size_estimate(tid)
+                if h_m and w_m:
+                    best = self._map(_COCO_TRUCK, h_m, w_m)
             self._cache[tid] = best
             return best
         votes = self._votes.get(tid)
