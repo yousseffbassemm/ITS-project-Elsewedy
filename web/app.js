@@ -146,8 +146,7 @@
       '(5.9% spread). Speeds inherit that rectification and assume a ' +
       '<code>dash_pitch_m</code> of 12&nbsp;m — change only that value if this road uses a different ' +
       'marking standard, or set <code>target_size_m</code> from a surveyed ground distance to remove ' +
-      'the assumption. Classes <code>C</code> (light truck) &amp; <code>V</code> (van) need a model ' +
-      'fine-tuned on the 7-class scheme; v1 maps to the nearest reliable class.</div>';
+      'the assumption.</div>' + classNote(a);
 
     // ---- congestion timeline (rendered FIRST, before any Chart.js chart) ----
     // A state ribbon, not a bar chart: congestion is a categorical state over
@@ -258,6 +257,21 @@
     }
     host.innerHTML = `<div class="ribbon">${seg}</div>
       <div class="ribbon-axis">${ticks.join('')}</div>`;
+  }
+
+  // Where the class labels on THIS report came from. Previously hard-coded to
+  // "C and V need a fine-tuned model", which stopped being true the moment one
+  // was wired in — the page denied using the thing it was using. Reports have to
+  // describe their own run.
+  function classNote(a) {
+    const c = a.classification;
+    if (!c) return '';   // report predates the field
+    const trained = !!c.model;
+    return '<div class="note"' +
+      (trained ? '' : ' style="border-left:4px solid #ffbe3d;background:rgba(255,190,61,.08);"') +
+      '><b>Vehicle class source:</b> ' + escapeHtml(c.source) +
+      (trained ? ' — <code>' + escapeHtml(c.model) + '</code>' : '') +
+      '<br>' + escapeHtml(c.note || '') + '</div>';
   }
 
   function worstCls(l) { return { 'Free-flow': 'green', 'Moderate': 'amber', 'Heavy': 'amber', 'Jam': 'red' }[l] || 'ink'; }

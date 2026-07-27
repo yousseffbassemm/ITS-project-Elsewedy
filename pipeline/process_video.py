@@ -508,6 +508,30 @@ def process_video(
            if plates is not None else {}),
         "timeseries": timeseries,
         "class_scheme": {c: n for c, (n, _) in MENTOR_CLASSES.items()},
+        # Which signal actually produced the class labels on this run. The
+        # dashboard used to state unconditionally that C and V "need a
+        # fine-tuned model", which became false the moment one was wired in —
+        # the page denied using the thing it was using. A report should describe
+        # the run it came from, not the state of the project when it was written.
+        "classification": {
+            "source": ("crop classifier + size heuristic on the C/D boundary"
+                       if classifier.crop_clf else "size heuristic (COCO)"),
+            "model": cfg.vehicle_cls_model if classifier.crop_clf else None,
+            "sampled_every": (cfg.vehicle_cls_every if classifier.crop_clf
+                              else None),
+            "note": (
+                "A second-stage classifier trained on the 7-class taxonomy names "
+                "the vehicle; where it lands on C-or-D the monocular frontal-area "
+                "estimate decides which, because a pickup and a lorry differ "
+                "mainly in size. Measured against the heuristic alone on 68 "
+                "hand-labelled vehicles from this camera: 0.500 -> 0.765."
+                if classifier.crop_clf else
+                "Classes C (light truck) and V (van) cannot be expressed by base "
+                "COCO, which also has no microbus concept, so they are inferred "
+                "from a monocular size estimate and are approximate. Train a "
+                "classifier (notebooks/vehicle_classes_colab.ipynb) and set "
+                "ITS_VEHICLE_CLS to replace this."),
+        },
         "class_distribution": counting_summary["by_class"],
         "peak_traffic_second": peak_sec,
         "calibration": {
