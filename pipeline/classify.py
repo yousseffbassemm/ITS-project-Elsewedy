@@ -135,10 +135,67 @@ def native_code_map(names) -> dict[int, str] | None:
     return mapped
 
 
+class CropClassifier:
+    """Second-stage classifier: mentor class from a cropped vehicle.
+
+    Detection is not the weak part of this pipeline — YOLO finds the vehicles and
+    the tracker holds them across occlusions. The LABEL is weak, because base
+    COCO has four vehicle classes against the taxonomy's seven and no microbus
+    concept at all. A classifier over the tracked crop targets exactly that, and
+    it trains on the crops tools/harvest_dataset.py already produces rather than
+    needing boxes redrawn on full frames.
+
+    Measured against the size heuristic on 68 hand-labelled vehicles from
+    street_egypt.mp4: overall 0.500 -> 0.676, with bus/microbus 0.042 -> 0.833.
+    Microbuses are roughly a third of the traffic on that road.
+
+    Missing or unloadable weights are reported, not raised — the rest of the
+    analytics do not depend on this and must not be lost to it.
+    """
+
+    def __init__(self, weights: str, device: str = "cpu", imgsz: int = 128):
+        self.model = None
+        self.error: str | None = None
+        self.imgsz, self.device = imgsz, device
+        self.names: dict[int, str] = {}
+        try:
+            from pathlib import Path
+
+            from ultralytics import YOLO
+            if not Path(weights).exists():
+                raise FileNotFoundError(weights)
+            self.model = YOLO(weights)
+            self.names = {int(k): str(v) for k, v in self.model.names.items()}
+            unknown = {v for v in self.names.values() if v not in MENTOR_CLASSES}
+            if unknown:
+                raise ValueError(
+                    f"weights emit non-taxonomy classes {sorted(unknown)}; "
+                    f"expected a subset of {sorted(MENTOR_CLASSES)}")
+        except Exception as exc:                   # pragma: no cover - env dependent
+            self.model = None
+            self.error = f"{type(exc).__name__}: {exc}"
+
+    def predict(self, crop) -> tuple[str, float] | None:
+        """(mentor_code, confidence) for one crop, or None if unavailable."""
+        if self.model is None or crop is None or crop.size == 0:
+            return None
+        h, w = crop.shape[:2]
+        if w < 16 or h < 16:
+            return None                            # too small to be evidence
+        try:
+            r = self.model.predict(crop, imgsz=self.imgsz, verbose=False,
+                                   device=self.device)[0]
+            return self.names.get(int(r.probs.top1), "F"), float(r.probs.top1conf)
+        except Exception:                          # pragma: no cover
+            return None
+
+
 class VehicleClassifier:
     """Accumulates per-track evidence and resolves each vehicle's mentor class."""
 
-    def __init__(self, transformer=None, native_codes: dict[int, str] | None = None):
+    def __init__(self, transformer=None, native_codes: dict[int, str] | None = None,
+                 crop_classifier: "CropClassifier | None" = None,
+                 crop_every: int = 5):
         # When the detector already speaks the mentor taxonomy, its class head is
         # authoritative and every heuristic below is skipped.
         self.native = native_codes
@@ -151,7 +208,17 @@ class VehicleClassifier:
                 self._inv = np.linalg.inv(transformer.m)
             except np.linalg.LinAlgError:      # pragma: no cover - degenerate cfg
                 self._inv = None
+        # A trained crop classifier speaks the taxonomy directly, so its votes
+        # live in CODE space rather than COCO-id space and take priority in
+        # resolve(). Run every Nth observation per track: on CPU this is a
+        # second inference per vehicle per frame, and a vehicle is visible for
+        # tens of frames, so sampling costs almost no accuracy after the vote.
+        self.crop_clf = crop_classifier if (crop_classifier is not None
+                                            and crop_classifier.model) else None
+        self.crop_every = max(int(crop_every), 1)
         self._votes: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+        self._code_votes: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self._seen_n: dict[int, int] = defaultdict(int)
         self._height: dict[int, list[float]] = defaultdict(list)
         self._width: dict[int, list[float]] = defaultdict(list)
         self._cache: dict[int, str] = {}
@@ -167,9 +234,27 @@ class VehicleClassifier:
             np.array([[[m[0][0] + 1.0, m[0][1]]]], dtype=np.float32), self._inv)[0][0]
         return float(np.hypot(shifted[0] - gx, shifted[1] - gy))
 
-    def observe(self, tid: int, coco_id: int, xyxy=None, conf: float = 1.0) -> None:
+    def observe(self, tid: int, coco_id: int, xyxy=None, conf: float = 1.0,
+                frame=None) -> None:
         tid = int(tid)
         weight = float(conf)
+        n = self._seen_n[tid]
+        self._seen_n[tid] = n + 1
+        if self.crop_clf is not None and frame is not None and xyxy is not None \
+                and n % self.crop_every == 0:
+            h, w = frame.shape[:2]
+            x1, y1, x2, y2 = (int(round(float(v))) for v in xyxy)
+            x1, y1 = max(x1, 0), max(y1, 0)
+            x2, y2 = min(x2, w), min(y2, h)
+            if x2 - x1 > 0 and y2 - y1 > 0:
+                got = self.crop_clf.predict(frame[y1:y2, x1:x2])
+                if got is not None:
+                    code, cconf = got
+                    # Weight the same way the COCO vote is weighted: by apparent
+                    # size, so a clear near view outranks a distant blob.
+                    self._code_votes[tid][code] += cconf * max(
+                        (y2 - y1) / EVIDENCE_REF_PX, 1e-3)
+                    self._cache.pop(tid, None)
         if xyxy is not None:
             x1, y1, x2, y2 = (float(v) for v in xyxy)
             gx, gy = (x1 + x2) / 2.0, y2
@@ -197,6 +282,16 @@ class VehicleClassifier:
         tid = int(tid)
         if tid in self._cache:
             return self._cache[tid]
+        # A trained crop classifier wins outright where it has an opinion. It
+        # was trained on the taxonomy itself, whereas the path below is a
+        # monocular size heuristic over COCO classes that cannot express C or V
+        # at all — so mixing the two would only let the weaker signal dilute the
+        # stronger one.
+        code_votes = self._code_votes.get(tid)
+        if code_votes:
+            best = max(code_votes, key=code_votes.get)
+            self._cache[tid] = best
+            return best
         votes = self._votes.get(tid)
         if not votes:
             return "F"

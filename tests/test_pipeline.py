@@ -545,6 +545,61 @@ def test_speed_report_carries_per_vehicle_figures():
               VehicleClassifier())["per_vehicle"] == {})
 
 
+def test_crop_classifier_overrides_the_size_heuristic():
+    """A trained crop classifier must win, and must never be a hard dependency.
+
+    The heuristic below it is a monocular size estimate over COCO classes that
+    cannot express C or V at all and has no microbus concept — measured on
+    street_egypt.mp4 it calls bus/microbus right 1 time in 24, on a road where
+    microbuses are a third of the traffic. Mixing the two votes would let the
+    weaker signal dilute the stronger one, so code votes take priority outright.
+    """
+    class _Fake:
+        model = True
+
+        def __init__(self, code, conf=0.9):
+            self.code, self.conf = code, conf
+            self.calls = 0
+
+        def predict(self, crop):
+            self.calls += 1
+            return (self.code, self.conf)
+
+    frame = np.zeros((H, W, 3), dtype=np.uint8)
+    box = [500.0, 300.0, 600.0, 420.0]
+
+    fake = _Fake("E")
+    clf = VehicleClassifier(None, None, crop_classifier=fake, crop_every=1)
+    clf.observe(7, 2, box, conf=0.95, frame=frame)      # COCO says car -> A
+    check("the crop classifier's class wins over the COCO heuristic",
+          clf.resolve(7) == "E", f"got {clf.resolve(7)}")
+
+    # ...and with no frame, or no classifier, the heuristic still runs.
+    plain = VehicleClassifier()
+    plain.observe(7, 2, box, conf=0.95)
+    check("without a crop classifier the heuristic still resolves",
+          plain.resolve(7) == "A", f"got {plain.resolve(7)}")
+
+    # Sampling: a second inference per vehicle per frame is expensive on CPU,
+    # and a vehicle is visible for tens of frames.
+    sampled = _Fake("E")
+    c2 = VehicleClassifier(None, None, crop_classifier=sampled, crop_every=5)
+    for _ in range(10):
+        c2.observe(9, 2, box, conf=0.9, frame=frame)
+    check("classifier is sampled, not run every frame", sampled.calls == 2,
+          f"{sampled.calls} calls in 10 observations")
+
+    # A classifier that failed to load must be ignored entirely, not raise:
+    # a class label is not worth losing the counts over.
+    class _Dead:
+        model = None
+
+    c3 = VehicleClassifier(None, None, crop_classifier=_Dead())
+    c3.observe(7, 2, box, conf=0.95, frame=frame)
+    check("unloadable weights fall back to the heuristic",
+          c3.resolve(7) == "A", f"got {c3.resolve(7)}")
+
+
 def test_vans_are_not_guessed():
     """Vans are reported as A rather than guessed, by design.
 
@@ -1071,6 +1126,7 @@ def main() -> int:
     test_class_mapping()
     test_class_vote_prefers_near_field_evidence()
     test_near_field_views_outweigh_distant_ones()
+    test_crop_classifier_overrides_the_size_heuristic()
     test_vans_are_not_guessed()
     test_finetuned_model_is_detected_and_takes_over()
     test_finetuned_model_works_downstream_not_just_in_classify()

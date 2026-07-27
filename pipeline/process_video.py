@@ -163,7 +163,19 @@ def process_video(
     # is what lets it tell a pickup from a lorry. If the model is fine-tuned on the
     # mentor taxonomy, its own class head is used instead and the heuristic is
     # bypassed entirely.
-    classifier = VehicleClassifier(speed.transformer, detector.native_codes)
+    # Optional second-stage crop classifier. Self-contained like the plate
+    # stage: missing weights are reported and every other analytic is
+    # unaffected, because a class label is not worth losing the counts over.
+    crop_clf = None
+    if cfg.vehicle_cls_model:
+        from .classify import CropClassifier
+        crop_clf = CropClassifier(cfg.vehicle_cls_model)
+        print(f"[classes] crop classifier: "
+              f"{'loaded ' + cfg.vehicle_cls_model if crop_clf.model else crop_clf.error}",
+              flush=True)
+    classifier = VehicleClassifier(speed.transformer, detector.native_codes,
+                                   crop_classifier=crop_clf,
+                                   crop_every=cfg.vehicle_cls_every)
     vehicle_ids = detector.vehicle_ids
 
     # Plate stage. Optional and self-contained: if the weights are missing it
@@ -248,7 +260,8 @@ def process_video(
                     cid = int(det.class_id[i])
                     if cid in vehicle_ids:
                         classifier.observe(int(det.tracker_id[i]), cid,
-                                           det.xyxy[i], float(confs[i]))
+                                           det.xyxy[i], float(confs[i]),
+                                           frame=frame)
                 # Plates are found once across the whole frame, then matched to
                 # vehicles — see PlateReader._find_plates_frame for why per-crop
                 # detection is wrong here.

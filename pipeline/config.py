@@ -120,6 +120,21 @@ class PipelineConfig:
     roi_gated_tracking: bool = True
     roi_margin_px: int = 45
 
+    # --- Vehicle class ------------------------------------------------------------
+    # Second-stage classifier over each tracked crop, emitting the mentor
+    # taxonomy directly. Empty means "use the COCO size heuristic", which cannot
+    # express C (light truck) or V (van) and has no microbus concept — measured
+    # on street_egypt.mp4 it gets bus/microbus right 1 time in 24, and
+    # microbuses are about a third of that road's traffic.
+    #
+    # Train one with notebooks/vehicle_classes_colab.ipynb; deploy with
+    # ITS_VEHICLE_CLS=models/vehicle_cls.pt. See tools/train_vehicle_classes.py.
+    vehicle_cls_model: str = ""
+    # Run the classifier on every Nth observation of a track. It is a second
+    # inference per vehicle per frame on CPU, and a vehicle is visible for tens
+    # of frames, so sampling costs almost nothing once the per-track vote runs.
+    vehicle_cls_every: int = 5
+
     # --- Licence plates -----------------------------------------------------------
     # Plate detection and plate COLOUR need only ~20 px of plate width and work on
     # this camera. Plate OCR needs ~100 px and does not: measured four ways, plates
