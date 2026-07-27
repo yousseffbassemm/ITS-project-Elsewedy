@@ -32,9 +32,10 @@ Built for the Elsewedy Electric AI-department Intelligent-Transportation-Systems
 - **Licence plates** — plate detection + **plate colour**, which in Egypt encodes
   vehicle category (red = truck, light blue = private, brown = commercial) and so
   gives independent evidence for the hard A/C/V classes. **Plate OCR is
-  footage-limited**: it needs ~100 px of plate width and the calibrated clip
-  provides ~34 px, so it is a camera limit rather than a model one. Check any clip
-  before training with `python -m tools.plate_footage_check`. See
+  footage-limited**: ~100 px of plate width to read a single frame, or ~65 px
+  with the multi-frame fusion pipeline (`--enhance`), against the ~34 px the
+  calibrated clip provides — so it is a camera limit rather than a model one.
+  Check any clip before training with `python -m tools.plate_footage_check`. See
   [`docs/anpr-plan.md`](docs/anpr-plan.md).
 - **Dashboard** — drag-drop upload → live progress → annotated video + KPIs +
   charts (volume, vehicle mix, speed histogram, directional flow, lane analytics,

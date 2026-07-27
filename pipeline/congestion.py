@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import supervision as sv
 
-from .config import CONGESTION_LEVELS, VEHICLE_CLASSES, PipelineConfig
+from .config import COCO_SCHEME, CONGESTION_LEVELS, PipelineConfig
 
 # Highest congestion level permitted for a given vehicle count in the ROI,
 # indexed by count: 0 or 1 vehicle can never be worse than Free-flow, 2 at most
@@ -22,8 +22,11 @@ MIN_LEVEL_SHARE_PCT = 1.0
 
 
 class CongestionMonitor:
-    def __init__(self, cfg: PipelineConfig, w: int, h: int):
+    def __init__(self, cfg: PipelineConfig, w: int, h: int, scheme=COCO_SCHEME):
         self.cfg = cfg
+        # Which class ids occupy road space depends on the model — see
+        # config.ClassScheme.
+        self.scheme = scheme
         self.roi = cfg.roi_px(w, h)
         mask = np.zeros((h, w), dtype=np.uint8)
         cv2.fillPoly(mask, [self.roi], 1)
@@ -48,7 +51,7 @@ class CongestionMonitor:
         cover.fill(0)
         n = 0
         for i in range(len(det)):
-            if int(det.class_id[i]) not in VEHICLE_CLASSES:
+            if not self.scheme.is_vehicle(det.class_id[i]):
                 continue
             x1, y1, x2, y2 = det.xyxy[i].astype(int)
             cx, cy = (x1 + x2) // 2, y2  # bottom-centre

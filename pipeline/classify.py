@@ -70,6 +70,19 @@ _COCO_CAR, _COCO_MOTO, _COCO_BICYCLE, _COCO_BUS, _COCO_TRUCK = 2, 3, 1, 5, 7
 HEAVY_MIN_FRONTAL_AREA_M2 = 9.0
 MIN_SIZE_SAMPLES = 4
 
+# Apparent box height, in pixels, that counts as one unit of evidence in the
+# class vote. A 200 px near-field view then weighs ~2 and a 15 px distant blob
+# ~0.15, which is the point: the detector's class call on a handful of pixels is
+# barely better than a guess, and there are many more distant frames than close
+# ones, so unweighted they would dominate.
+#
+# This weighting was documented but not implemented: the pixel height was
+# divided by the image scale at the vehicle's ground point, which converts it to
+# a PHYSICAL height and cancels distance exactly — a vehicle contributed the same
+# weight at 15 px as at 200 px. Metric height is still measured, but for the C/D
+# size test, which is what it is actually for.
+EVIDENCE_REF_PX = 100.0
+
 
 def display_name(code: str) -> str:
     return MENTOR_CLASSES.get(code, ("Unknown", ""))[0]
@@ -160,11 +173,14 @@ class VehicleClassifier:
         if xyxy is not None:
             x1, y1, x2, y2 = (float(v) for v in xyxy)
             gx, gy = (x1 + x2) / 2.0, y2
+            # Near-field views are much better evidence: weight by APPARENT
+            # (pixel) size, which is what carries the detail the detector
+            # classified from. Applied whether or not the homography is usable,
+            # since it needs no calibration.
+            weight *= max(y2 - y1, 1.0) / EVIDENCE_REF_PX
             scale = self._px_per_metre(gx, gy)
             if scale > 1.0:
-                # Near-field views are much better evidence: weight by apparent
-                # size so a distant blob cannot outvote a clear close-up.
-                weight *= max(y2 - y1, 1.0) / scale
+                # Metric size, for the C/D frontal-area test only.
                 self._height[tid].append((y2 - y1) / scale)
                 self._width[tid].append((x2 - x1) / scale)
         self._votes[tid][int(coco_id)] += max(weight, 1e-6)

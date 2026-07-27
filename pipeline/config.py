@@ -23,6 +23,80 @@ VEHICLE_CLASSES = {
     7: "truck",
 }
 
+# Coarse groups for the re-id class gate. Base YOLO flip-flops between car, truck
+# and bus on the SAME vehicle from frame to frame, so demanding an exact class
+# match would block legitimate re-attachments; grouping keeps the gate meaningful
+# (a motorcycle can never be stitched to a lorry) while tolerating that.
+TWO_WHEELER, FOUR_WHEELER, PEDESTRIAN, UNGROUPED = 0, 1, 2, -1
+_COCO_GROUPS = {1: TWO_WHEELER, 3: TWO_WHEELER,          # bicycle, motorcycle
+                2: FOUR_WHEELER, 5: FOUR_WHEELER, 7: FOUR_WHEELER,  # car/bus/truck
+                0: PEDESTRIAN}
+# Same grouping expressed over the mentor taxonomy, for a fine-tuned model.
+_MENTOR_GROUPS = {"G": TWO_WHEELER,
+                  "A": FOUR_WHEELER, "C": FOUR_WHEELER, "D": FOUR_WHEELER,
+                  "E": FOUR_WHEELER, "V": FOUR_WHEELER,
+                  "F": UNGROUPED, "P": PEDESTRIAN}
+
+
+@dataclass(frozen=True)
+class ClassScheme:
+    """Which detector class ids mean 'vehicle', 'person', and how they group.
+
+    Base COCO and a model fine-tuned on the mentor taxonomy use DIFFERENT id
+    spaces for the same concepts, and everything downstream of the detector —
+    counting, speed, occupancy, the re-id class gate — has to ask which is which.
+    Hard-coding the COCO ids there is what made the fine-tuned path silently
+    wrong: with a 7-class model, class 0 is "A" (private car), not "person", so
+    every private car crossing the line was recorded as a PEDESTRIAN, and the
+    classes COCO has no id for (G at 4, F at 6) were dropped from the counts, the
+    speed sample and the occupancy measure entirely.
+
+    docs/finetuning-plan.md §7 promises the fine-tune is a drop-in. This is the
+    object that makes that true: build it once from the loaded model and pass it
+    to every stage, instead of each stage assuming COCO.
+    """
+
+    vehicle_ids: frozenset
+    person_ids: frozenset
+    groups: dict
+
+    def is_vehicle(self, class_id) -> bool:
+        return int(class_id) in self.vehicle_ids
+
+    def is_person(self, class_id) -> bool:
+        return int(class_id) in self.person_ids
+
+    def group(self, class_id) -> int:
+        """Coarse group for the re-id gate; UNGROUPED never matches anything."""
+        return self.groups.get(int(class_id), UNGROUPED)
+
+
+COCO_SCHEME = ClassScheme(
+    vehicle_ids=frozenset(VEHICLE_CLASSES),
+    person_ids=frozenset({PERSON_CLASS}),
+    groups=dict(_COCO_GROUPS),
+)
+
+
+def scheme_for_codes(native_codes: dict | None) -> ClassScheme:
+    """Class scheme for a model, given its {class_id: mentor_code} map.
+
+    ``None`` means a plain COCO model, which gets the COCO scheme. A fine-tuned
+    model has no person class at all — the mentor taxonomy does not include one —
+    so pedestrian counts are legitimately zero rather than silently full of cars.
+    ``F`` (unknown) is a vehicle for counting purposes but is left UNGROUPED, so
+    the re-id gate never stitches two vehicles together on the strength of both
+    being unidentifiable.
+    """
+    if not native_codes:
+        return COCO_SCHEME
+    return ClassScheme(
+        vehicle_ids=frozenset(i for i, c in native_codes.items() if c != "P"),
+        person_ids=frozenset(i for i, c in native_codes.items() if c == "P"),
+        groups={int(i): _MENTOR_GROUPS.get(c, UNGROUPED)
+                for i, c in native_codes.items()},
+    )
+
 
 @dataclass
 class PipelineConfig:
@@ -71,14 +145,20 @@ class PipelineConfig:
     # Keeps the best N views of each vehicle's plate, super-resolves only those,
     # OCRs each and votes. See pipeline/plate_ocr.py.
     plate_enhance: bool = False
-    plate_keep_crops: int = 3
+    # Crops kept per vehicle for fusion. 12, not 3: the measured gain that
+    # justifies fusion at all (+15-20 character-accuracy points, docs/anpr-plan.md
+    # §5c) was measured with TWELVE-frame fusion, so keeping 3 was leaving most
+    # of the only technique that genuinely recovers detail on the table. Crops
+    # far smaller than the best one are excluded at fusion time regardless
+    # (plate_ocr.FUSE_SCALE_TOLERANCE), so a larger keep costs little.
+    plate_keep_crops: int = 12
     plate_sr_model: str = "models/RealESRGAN_x4.pth"
     plate_alpr_model: str = "models/eg_alpr.pt"
     # Super-resolution multiplies effective width by 4, so a 25px plate becomes
     # 100px. Whether that is a genuine read or an upscaling artefact is exactly
     # what the cross-crop vote is there to test, so the floor applied to the
     # ENHANCED pipeline is on the raw crop and deliberately low.
-    plate_enhance_min_px: float = 12.0
+    plate_enhance_min_px: float = 12.0  # raw-crop floor; fusion reads start ~50px
     # Write every intermediate image (raw crop, super-resolved, OCR overlay).
     plate_debug_dir: str = ""
 

@@ -41,6 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.classify import VehicleClassifier          # noqa: E402
 from pipeline.config import PipelineConfig, VEHICLE_CLASSES  # noqa: E402
+from pipeline.plates import (                            # noqa: E402
+    MARGINAL_PX_FOR_FUSED_OCR, MIN_PX_FOR_FUSED_OCR, MIN_PX_FOR_OCR,
+)
 from pipeline.speed import ViewTransformer               # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,19 +53,17 @@ ROOT = Path(__file__).resolve().parent.parent
 # offered for the stock 4K clips, which are European.
 PLATE_WIDTH_M = {"eg": 0.32, "eu": 0.52}
 
-# Readability thresholds, in PLATE PIXEL WIDTH.
+# Readability thresholds, in PLATE PIXEL WIDTH. Imported from the pipeline so
+# this tool and the runtime gate cannot drift apart — see pipeline/plates.py for
+# the measured accuracy curve these come from (docs/anpr-plan.md §5c).
 #
-# These derive from character height, which is what OCR actually needs: roughly
-# 16 px is the widely used floor for Latin glyphs and ~20 px is where accuracy
-# stops degrading. An Egyptian plate packs Arabic letters AND numerals into its
-# width, and Arabic glyphs differ by fine strokes and dots, so it needs the upper
-# end of that range rather than the floor.
-#
-# Converting to width: a plate ~2:1 with characters ~55% of its height means a
-# 100 px wide plate carries ~27 px of glyph height. Hence:
-READABLE_PX = 100.0        # comfortable — expect good OCR
-MARGINAL_PX = 60.0         # some reads, many errors; multi-frame fusion may help
-# Below MARGINAL_PX, OCR is not a training problem and no model will fix it.
+#   >= READABLE_PX  a single frame reads (95.8% character accuracy)
+#   >= FUSION_PX    multi-frame fusion reaches the same (93.1%); one frame gives 78%
+#   >= MARGINAL_PX  fusion is partial (66.7%); expect errors
+#   below           not a training problem, and no model will fix it
+READABLE_PX = MIN_PX_FOR_OCR
+FUSION_PX = MIN_PX_FOR_FUSED_OCR
+MARGINAL_PX = MARGINAL_PX_FOR_FUSED_OCR
 
 # Fraction of a vehicle's box width taken up by its plate. A car is ~1.8 m wide
 # and an Egyptian plate ~0.32 m, so ~0.18. Used only for the empirical estimate.
@@ -112,12 +113,19 @@ def empirical_estimate(video: Path, cfg: PipelineConfig, max_frames: int,
 
 def verdict(plate_px: float) -> tuple[str, str]:
     if plate_px >= READABLE_PX:
-        return "OCR FEASIBLE", "train and deploy OCR on this footage"
+        return "OCR FEASIBLE", "single-frame OCR reads this footage (~96% chars)"
+    if plate_px >= FUSION_PX:
+        return "OCR FEASIBLE (fusion)", (
+            "run with --enhance: multi-frame fusion reads this (~93% chars), "
+            "a single frame only manages ~78%")
     if plate_px >= MARGINAL_PX:
-        return "MARGINAL", "partial reads; try multi-frame fusion, expect errors"
+        return "MARGINAL", (
+            "partial reads even with --enhance (~67% chars); expect errors and "
+            "do not report plate numbers unattended")
     return "OCR NOT FEASIBLE", (
-        f"needs ~{READABLE_PX / max(plate_px, 1e-6):.1f}x more plate resolution — "
-        "a camera change, not a training problem"
+        f"needs ~{FUSION_PX / max(plate_px, 1e-6):.1f}x more plate resolution "
+        f"to reach the {FUSION_PX:.0f}px fusion floor — a camera change, not a "
+        "training problem"
     )
 
 
@@ -148,7 +156,8 @@ def report(video: Path, cfg: PipelineConfig, plate_w_m: float, region: str,
     best = max(geo_best, emp_best)
     tag, advice = verdict(best)
     print(f"\n  best achievable plate width: {best:.0f} px "
-          f"(readable >= {READABLE_PX:.0f}, marginal >= {MARGINAL_PX:.0f})")
+          f"(single-frame >= {READABLE_PX:.0f}, with fusion >= {FUSION_PX:.0f}, "
+          f"marginal >= {MARGINAL_PX:.0f})")
     print(f"  VERDICT: {tag} — {advice}")
     # Detection and colour survive far below the OCR floor: a 30 px plate is
     # still a findable rectangle with a recoverable dominant hue.

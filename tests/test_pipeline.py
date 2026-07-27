@@ -21,7 +21,9 @@ import supervision as sv
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.classify import VehicleClassifier, native_code_map   # noqa: E402
-from pipeline.config import PipelineConfig               # noqa: E402
+from pipeline.config import (                            # noqa: E402
+    COCO_SCHEME, UNGROUPED, PipelineConfig, scheme_for_codes,
+)
 from pipeline.congestion import CongestionMonitor        # noqa: E402
 from pipeline.counting import LineCounter                # noqa: E402
 from pipeline.lanes import LaneModel                     # noqa: E402
@@ -30,7 +32,9 @@ from pipeline.reid import IdStabilizer, _group, _iou     # noqa: E402
 from pipeline.plates import (                            # noqa: E402
     COLOR_TO_CODES, PlateReader, classify_band,
 )
-from pipeline.plate_ocr import crop_score, sharpness, vote  # noqa: E402
+from pipeline.plate_ocr import (                          # noqa: E402
+    PlateEnhancer, crop_score, sharpness, vote,
+)
 from pipeline.speed import SpeedEstimator                # noqa: E402
 
 W, H, FPS = 1280, 720, 25.0
@@ -398,6 +402,149 @@ def test_finetuned_model_is_detected_and_takes_over():
           clf.resolve(1) == "V", f"got {clf.resolve(1)}")
 
 
+def test_finetuned_model_works_downstream_not_just_in_classify():
+    """A 7-class model must be understood by COUNTING, SPEED and OCCUPANCY too.
+
+    Regression, and the most damaging one found: classify.py honoured a
+    fine-tuned model's class head, but counting, speed, congestion and the re-id
+    class gate all hard-coded the COCO ids. On the model docs/finetuning-plan.md
+    §7 describes as a drop-in:
+
+        class 0 is 'A' (private car), and PERSON_CLASS is 0  -> every private
+            car crossing the line was recorded as a PEDESTRIAN, so
+            total_vehicles omitted the commonest class entirely
+        classes 4 (G) and 6 (F) are in no COCO set -> dropped from counts,
+            from the speed sample and from the occupancy measure
+        re-id groups are COCO-keyed -> 'A' landed in the pedestrian group and
+            'G' in no group at all, so the class gate was nonsense
+
+    Everything now takes its class meanings from config.ClassScheme.
+    """
+    names = {0: "A", 1: "C", 2: "D", 3: "E", 4: "G", 5: "V", 6: "F"}
+    sch = scheme_for_codes(native_code_map(names))
+    (_, ly), _ = CFG.line_px(W, H)[0], CFG.line_px(W, H)[1]
+    cm = CongestionMonitor(CFG, W, H, scheme=sch)
+    for cid, code in names.items():
+        c = LineCounter(CFG, W, H, None, scheme=sch)
+        for k in range(8):
+            yy = ly + 3 * 74 - k * 74
+            c.update(_det(615, yy - 45, 665, yy, cls=cid, tid=7))
+        occ, _n = cm._occupancy(_det(400, 500, 500, 600, cls=cid, tid=1))
+        ok = (c.total_vehicles() == 1
+              and c.pedestrians_in + c.pedestrians_out == 0
+              and occ > 0)
+        check(f"native class {cid} ({code}) counts as a vehicle", ok,
+              f"counted={c.total_vehicles()} "
+              f"peds={c.pedestrians_in + c.pedestrians_out} occ={occ:.4f}")
+    check("native motorcycle keeps its own re-id group",
+          sch.group(4) != sch.group(0), f"G={sch.group(4)} A={sch.group(0)}")
+    check("native unknown (F) is ungrouped, so it never stitches",
+          sch.group(6) == UNGROUPED, f"got {sch.group(6)}")
+    check("a fine-tuned model has no pedestrian class at all",
+          not sch.person_ids, f"got {sch.person_ids}")
+    # ...and a plain COCO model must be completely unaffected.
+    check("COCO scheme still calls id 0 a person", COCO_SCHEME.is_person(0))
+    check("COCO scheme still calls id 2 a vehicle", COCO_SCHEME.is_vehicle(2))
+    check("COCO scheme is what an un-fine-tuned model gets",
+          scheme_for_codes(None) is COCO_SCHEME)
+
+
+def test_ungrouped_classes_never_merge_with_each_other():
+    """Two 'unknown' vehicles agreeing on being unknown is not evidence.
+
+    The re-id gate compares class GROUPS, so without this an id whose class the
+    scheme does not recognise would match any other unrecognised id — the gate
+    would pass on -1 == -1 and weld two different vehicles together.
+    """
+    sch = scheme_for_codes({0: "F", 1: "F"})
+    s = IdStabilizer(FPS, scheme=sch)
+    frame = np.zeros((H, W, 3), dtype=np.uint8)
+    a = np.array([[300., 400., 380., 480.]])
+    s.assign(frame, a, np.array([1]), np.array([0]), 0)
+    # same place a few frames later, a brand-new raw id: a stitch candidate
+    ids = s.assign(frame, a, np.array([2]), np.array([1]), 4)
+    check("an ungrouped class is not stitched to another ungrouped one",
+          s.stitches == 0, f"stitches={s.stitches} ids={ids.tolist()}")
+
+
+def test_near_field_views_outweigh_distant_ones():
+    """The class vote must actually weight by apparent size, as documented.
+
+    Regression: the weight divided pixel height by the image scale at the
+    vehicle's ground point, which converts it to a PHYSICAL height and cancels
+    distance exactly — a 15 px blob counted as much as a 200 px close-up, while
+    two separate docstrings claimed the opposite. Distant frames vastly
+    outnumber near ones, so unweighted they decide the class.
+    """
+    sp = SpeedEstimator(CFG, W, H, FPS, 1)
+    clf = VehicleClassifier(sp.transformer)
+    far = [630.0, 0.35 * H - 20, 650.0, 0.35 * H]        # 20 px tall
+    near = [600.0, 0.85 * H - 200, 700.0, 0.85 * H]      # 200 px tall
+    clf.observe(1, 7, far, conf=0.9)
+    w_far = clf._votes[1][7]
+    clf2 = VehicleClassifier(sp.transformer)
+    clf2.observe(1, 7, near, conf=0.9)
+    w_near = clf2._votes[1][7]
+    check("a near view carries more vote weight than a distant one",
+          w_near > 5 * w_far, f"near={w_near:.3f} far={w_far:.3f}")
+
+    # And the consequence: many distant weak calls must not beat a few close
+    # confident ones.
+    c = VehicleClassifier(sp.transformer)
+    for _ in range(20):
+        c.observe(1, 7, far, conf=0.35)          # distant, weakly "truck"
+    for _ in range(3):
+        c.observe(1, 2, near, conf=0.90)         # near, confidently "car"
+    check("20 distant blobs do not outvote 3 clear close-ups",
+          c.resolve(1) == "A", f"got {c.resolve(1)} votes={dict(c._votes[1])}")
+
+    # Metric size must still be recorded — it is what the C/D split runs on.
+    h_m, w_m = c.size_estimate(1)
+    check("metric size is still measured for the C/D test", h_m > 0 and w_m > 0,
+          f"h={h_m:.2f} w={w_m:.2f}")
+
+
+def test_plate_overlay_box_does_not_go_stale():
+    """The drawn plate box must belong to the CURRENT frame.
+
+    Regression: _boxes was never cleared, so once a plate was located the
+    annotator kept drawing a rectangle at that position for the rest of the
+    vehicle's life — a box detached from its vehicle, sliding backwards down the
+    road. Plate detection is intermittent at 34 px, so this was the normal case.
+    """
+    r = PlateReader()
+    frame = np.full((720, 1280, 3), 120, np.uint8)
+    det = sv.Detections(xyxy=np.array([[560.0, 360.0, 700.0, 460.0]]),
+                        class_id=np.array([2]), tracker_id=np.array([7]))
+    r._observe_one(7, frame, (600, 400, 634, 417))
+    check("a box found this frame is drawn", r.box_of(7) is not None)
+    # A frame in which the detector finds no plate must clear it. (No model is
+    # loaded, so _find_plates_frame returns nothing — exactly that case.)
+    r.observe_frame(frame, det)
+    check("a box not re-found this frame is not drawn", r.box_of(7) is None,
+          f"got {r.box_of(7)}")
+
+
+def test_speed_report_carries_per_vehicle_figures():
+    """analytics.json must expose per-vehicle speeds.
+
+    Regression: tools/export_plates_csv reads speed.per_vehicle to fill its
+    speed column, and the pipeline never emitted that key — so the column was
+    silently blank in every exported table.
+    """
+    s = SpeedEstimator(CFG, W, H, FPS, 1)
+    s._veh_samples = {4: [80.0] * 4, 9: [40.0] * 4}
+    summ = s.summary(VehicleClassifier())
+    pv = summ.get("per_vehicle")
+    check("per_vehicle is published", isinstance(pv, dict) and len(pv) == 2,
+          f"got {pv}")
+    check("keys survive a JSON round-trip as track ids",
+          {int(k) for k in json.loads(json.dumps(pv))} == {4, 9}, f"got {pv}")
+    check("empty runs still publish the key",
+          SpeedEstimator(CFG, W, H, FPS, 1).summary(
+              VehicleClassifier())["per_vehicle"] == {})
+
+
 def test_vans_are_not_guessed():
     """Vans are reported as A rather than guessed, by design.
 
@@ -604,15 +751,29 @@ def test_plate_colour_needs_repeated_evidence() -> None:
 
     A single sample must resolve to 'unknown' rather than committing, because at
     this resolution any one frame's reading is noisy.
+
+    The gate counts COLOUR readings, not plate detections. It used to count
+    len(_widths), which is appended for EVERY plate box including the sub-20px
+    ones no band is ever read from — so three tiny detections plus one colour
+    sample named a category off that single frame, which is exactly what the
+    gate exists to prevent.
     """
     r = PlateReader()
     r._colors[7]["red"] = 5.0
-    r._widths[7] = [30.0]                       # only one observation
+    r._color_n[7] = 1                           # only one colour reading
+    r._widths[7] = [30.0]
     check("a single plate sample does not resolve a colour",
           r.color_of(7) == "unknown", f"got {r.color_of(7)}")
-    r._widths[7] = [30.0, 31.0, 29.0]           # now enough
+
+    # The closed loophole: plenty of DETECTIONS, still only one colour read.
+    r._widths[7] = [12.0, 14.0, 13.0, 30.0]
     r._cache.pop(7, None)
-    check("repeated samples do resolve", r.color_of(7) == "red",
+    check("detections without colour readings do not satisfy the gate",
+          r.color_of(7) == "unknown", f"got {r.color_of(7)}")
+
+    r._color_n[7] = 3                           # now enough real colour reads
+    r._cache.pop(7, None)
+    check("repeated colour samples do resolve", r.color_of(7) == "red",
           f"got {r.color_of(7)}")
 
 
@@ -708,6 +869,154 @@ def test_vote_prefers_agreement_over_count() -> None:
     check("no reads gives no answer", vote([])[0] == "")
 
 
+def test_tailgate_badges_are_not_accepted_as_plates() -> None:
+    """The widest 'plate' in street_egypt.mp4 was a CHEVROLET badge.
+
+    Measured, and it is the most expensive false positive in the stage: at
+    94x17 px it was bright, sharp and horizontal, so the crop scorer ranked it
+    the BEST crop for that vehicle (0.872), spent super-resolution on it, fused
+    it with the two genuine plate views — degrading them — and inflated the
+    reported plate size, making the footage look more readable than it is.
+
+    Shape is what separates them. Real Egyptian plates run ~2:1 to 3:1; the
+    badge is 5.5:1. The upper bound stays generous because a plate viewed from
+    a steep angle foreshortens vertically and its aspect ratio rises.
+    """
+    frame = np.full((720, 1280, 3), 120, np.uint8)
+    r = PlateReader()
+    r._observe_one(1, frame, (100, 400, 194, 417))       # 94x17 badge
+    check("a 5.5:1 strip is rejected as not plate-shaped",
+          r.plate_px(1) == 0.0 and r.rejected_shape == 1,
+          f"px={r.plate_px(1)} rejected={r.rejected_shape}")
+
+    # ...and the three genuine plates measured off the same clip must survive.
+    for w, h, aspect in [(54, 21, "2.6"), (46, 16, "2.9"), (43, 14, "3.1")]:
+        r2 = PlateReader()
+        r2._observe_one(1, frame, (100, 400, 100 + w, 400 + h))
+        check(f"a real {w}x{h} plate ({aspect}:1) is kept",
+              r2.plate_px(1) == float(w), f"got {r2.plate_px(1)}")
+
+
+def test_character_height_is_reported_not_just_width() -> None:
+    """Plate WIDTH is not the binding number; character height is.
+
+    Every ANPR specification is written in character height, and the two come
+    apart at steep viewing angles — a 94px-wide detection 17px tall carries the
+    same ~9px characters as a 34px plate seen square-on. Reporting width alone
+    is what made a badge look like the readable plate in the clip.
+    """
+    frame = np.full((720, 1280, 3), 120, np.uint8)
+    r = PlateReader()
+    r._observe_one(1, frame, (100, 400, 154, 421))       # 54x21, a real plate
+    check("best-view width is reported alongside the p90",
+          r.plate_px_best(1) == 54.0, f"got {r.plate_px_best(1)}")
+    check("character height is derived from HEIGHT, not width",
+          abs(r.char_px_best(1) - 21 * 0.55) < 0.1, f"got {r.char_px_best(1)}")
+    check("and it lands below the 20px ANPR minimum for this footage",
+          r.char_px_best(1) < 20.0, f"got {r.char_px_best(1)}")
+
+
+def test_fusion_ignores_crops_of_a_different_scale() -> None:
+    """Fusing a 94px crop with 33px ones degrades the best view.
+
+    Multi-frame fusion combines samples of the same signal. A crop a third the
+    width carries a ninth of the information, and upscaling it to match
+    contributes interpolated mush that the median mixes into the result.
+    """
+    crops = [{"img": np.zeros((17, 94, 3), np.uint8), "w": 94},
+             {"img": np.zeros((13, 36, 3), np.uint8), "w": 36},
+             {"img": np.zeros((14, 33, 3), np.uint8), "w": 33}]
+    check("mismatched-scale crops are not fused", PlateEnhancer._fuse(crops) is None)
+    same = [{"img": np.zeros((21, 54, 3), np.uint8), "w": 54},
+            {"img": np.zeros((20, 50, 3), np.uint8), "w": 50}]
+    check("comparable-scale crops still fuse",
+          PlateEnhancer._fuse(same) is not None)
+
+
+def test_a_lone_read_is_never_certified() -> None:
+    """One read cannot corroborate itself.
+
+    Regression, measured on street_egypt.mp4: for a 38px plate all three crop
+    reads came back EMPTY and only the fused image produced anything. Being the
+    only read, every character position "agreed" with itself, mean agreement was
+    1.0 by construction, and the pipeline published a two-character plate at
+    **confidence 1.0** — the exact confident-garbage failure the whole plate
+    stage is designed around.
+    """
+    _t, lone, d1 = vote([("٣F", 0.56)])
+    _t, pair, d2 = vote([("ABC123", 0.9), ("ABC123", 0.8)])
+    check("a single read cannot reach full confidence", lone <= 0.5,
+          f"got {lone:.2f}")
+    check("corroborated reads still can", pair > 0.9, f"got {pair:.2f}")
+    check("corroboration is reported", d1["corroboration"] < d2["corroboration"])
+
+
+def test_implausible_and_undersized_reads_are_not_published() -> None:
+    """Evidence is kept; only fit-to-publish answers reach plate_text.
+
+    Two independent gates, because they catch different lies:
+      * a real Egyptian plate carries at least 5 glyphs, so a 2-character
+        string is the character detector firing on noise, at ANY resolution
+      * below the measured fusion floor, 12-frame fusion reads 0 of 50 plates
+        (docs/anpr-plan.md §5c), so whatever comes out is not a read
+    """
+    class _FakeOCR:
+        model = True
+
+        def __init__(self, text):
+            self.text = text
+
+        def read(self, img):
+            return (self.text, 0.9, [1] * len(self.text))
+
+    def run(text, width):
+        e = PlateEnhancer(sr=None, ocr=_FakeOCR(text), keep=3, min_px=12.0)
+        for _ in range(3):
+            e.offer(1, np.zeros((max(width // 2, 4), width, 3), np.uint8), 0.8)
+        return e.resolve(1)
+
+    r = run("٣F", 38)
+    check("a 2-character 'plate' is not published", r["plate_text"] == "",
+          f"got {r['plate_text']!r}")
+    check("but the discarded read is kept for inspection",
+          r.get("untrusted_read", {}).get("text") == "٣F", str(r.get("untrusted_read")))
+
+    r = run("٣٤٥AB", 34)          # plausible length, unreadable size
+    check("a plausible read below the fusion floor is not published",
+          r["plate_text"] == "", f"got {r['plate_text']!r}")
+    check("and the reason names the resolution floor",
+          "fusion" in r.get("untrusted_read", {}).get("rejected_because", ""),
+          str(r.get("untrusted_read")))
+
+    r = run("٣٤٥AB", 120)         # plausible length, adequate size
+    check("a plausible read on adequate footage IS published",
+          r["plate_text"] == "٣٤٥AB", f"got {r['plate_text']!r}")
+
+
+def test_carriageway_is_labelled_even_with_the_gate_off() -> None:
+    """Turning the ROI gate off must not make every vehicle 'analysed'.
+
+    The harvester deliberately tracks the whole frame — the opposite
+    carriageway is extra training data, not noise — and then labels which
+    carriageway each vehicle came from. The mask used to be built only when the
+    gate was ARMED, so with the gate off on_roadway() answered True for
+    everything and the label was meaningless.
+    """
+    cfg = PipelineConfig()
+    cfg.roi_gated_tracking = False
+    d = VehicleDetector.__new__(VehicleDetector)
+    d.cfg = cfg
+    d._roi_gate = False
+    m = np.zeros((H, W), dtype=np.uint8)
+    cv2.fillPoly(m, [cfg.roi_px(W, H)], 1)
+    d._roi_mask = m.astype(bool)
+    on = [640.0, 600.0, 740.0, 690.0]            # mid-carriageway, near field
+    off = [10.0, 40.0, 60.0, 80.0]               # top-left corner, off the road
+    check("a vehicle on the analysed carriageway is labelled so",
+          d.on_roadway(on) is True)
+    check("a vehicle off it is not", d.on_roadway(off) is False)
+
+
 def test_ocr_absence_is_explained() -> None:
     """An empty OCR column must say WHY, or it reads as a broken model.
 
@@ -748,6 +1057,7 @@ def main() -> int:
     test_speed_is_stride_independent()
     test_speed_survives_dropped_detections()
     test_speed_histogram_is_complete()
+    test_speed_report_carries_per_vehicle_figures()
     print("re-identification")
     test_reid_primitives()
     test_reid_tunables_scale_with_stride()
@@ -760,8 +1070,11 @@ def main() -> int:
     print("classification")
     test_class_mapping()
     test_class_vote_prefers_near_field_evidence()
+    test_near_field_views_outweigh_distant_ones()
     test_vans_are_not_guessed()
     test_finetuned_model_is_detected_and_takes_over()
+    test_finetuned_model_works_downstream_not_just_in_classify()
+    test_ungrouped_classes_never_merge_with_each_other()
     test_confirm_rate_detects_a_broken_stride()
     print("plates")
     test_washed_out_band_is_still_read()
@@ -769,11 +1082,18 @@ def main() -> int:
     test_oversized_plate_box_is_rejected()
     test_plate_goes_to_the_tightest_containing_vehicle()
     test_plate_colour_needs_repeated_evidence()
+    test_plate_overlay_box_does_not_go_stale()
     test_missing_plate_model_does_not_crash()
     test_sharper_crop_scores_higher()
     test_vote_prefers_agreement_over_count()
+    test_tailgate_badges_are_not_accepted_as_plates()
+    test_character_height_is_reported_not_just_width()
+    test_fusion_ignores_crops_of_a_different_scale()
+    test_a_lone_read_is_never_certified()
+    test_implausible_and_undersized_reads_are_not_published()
     test_ocr_gate_blocks_hallucinated_reads()
     test_ocr_absence_is_explained()
+    test_carriageway_is_labelled_even_with_the_gate_off()
     print("congestion")
     test_congestion_needs_actual_traffic()
     test_congestion_ignores_blips()

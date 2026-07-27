@@ -25,3 +25,9 @@ models/*.pt
 samples/*.mp4
 *.log
 .playwright-mcp/
+# Packaged crop sets for upload to a GPU host. Same personal data as
+# data/dataset/ — just zipped, which makes it easier to move somewhere it
+# should not go.
+*_cls.zip
+# Machine-local Claude Code settings; .claude/launch.json IS shared.
+.claude/settings.local.json

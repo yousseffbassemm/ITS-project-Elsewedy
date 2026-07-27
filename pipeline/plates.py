@@ -107,8 +107,24 @@ COLOR_DISPLAY = {
 
 # Resolution floors, in plate pixel width. Kept here rather than inline so the
 # footage checker and this module cannot drift apart.
+#
+# There are TWO OCR floors because there are two pipelines, and conflating them
+# is what made the docs contradict themselves. Measured on 50 real Egyptian
+# plates degraded to a fixed width (docs/anpr-plan.md §5c):
+#
+#     width | single frame | 12-frame fusion
+#      50px |    46.2%     |     66.7%
+#      65px |    77.8%     |     93.1%
+#     100px |    95.8%     |     99.5%
+#
+# So ~100px is the floor for reading ONE frame, which is what MIN_PX_FOR_OCR
+# gates; multi-frame fusion (pipeline/plate_ocr.PlateEnhancer) reaches the same
+# accuracy at ~65px, and is partial down to ~50px. Neither rescues this
+# project's 34px footage — fusion scores 12% there, 0 plates read.
 MIN_PX_FOR_COLOR = 20.0
-MIN_PX_FOR_OCR = 100.0
+MIN_PX_FOR_OCR = 100.0        # single-frame read
+MIN_PX_FOR_FUSED_OCR = 65.0   # multi-frame fusion + voting
+MARGINAL_PX_FOR_FUSED_OCR = 50.0
 MIN_SAMPLES = 3          # per-track colour votes before a colour is reported
 
 # A plate wider than this fraction of its vehicle's box is not a plate. Real
@@ -116,6 +132,24 @@ MIN_SAMPLES = 3          # per-track colour votes before a colour is reported
 # a motorcycle, whose plate is a much larger share of a narrow vehicle, while
 # still rejecting a detector that has locked onto the whole rear panel.
 MAX_PLATE_FRAC_OF_VEHICLE = 0.40
+
+# A plate is a rectangle of a particular SHAPE, and shape is the cheapest way to
+# reject the false positive that costs most here: tailgate brand lettering.
+#
+# Measured on street_egypt.mp4 — the single widest "plate" in the whole clip, at
+# 94px, was the CHEVROLET badge on a pickup's tailgate. It is bright, sharp,
+# high-contrast and horizontal, so the crop scorer ranked it BEST of all crops
+# for that vehicle (0.872) and spent the super-resolution and fusion passes on
+# it. It also inflated the reported plate size statistics, making the footage
+# look better than it is.
+#
+# Egyptian civilian plates run about 2:1 to 3:1. The band below is deliberately
+# wider than that: a plate seen from a steep downward angle foreshortens
+# vertically and its aspect ratio RISES, so the upper bound has to tolerate
+# genuine perspective. The badge sits at 5.5:1, outside it. Anything beyond this
+# band is a strip of something, not a plate — and at that foreshortening the
+# characters are unreadable regardless.
+MIN_PLATE_ASPECT, MAX_PLATE_ASPECT = 1.5, 4.5
 
 
 # How much more saturated the band must be than the plate BODY before it counts
@@ -195,10 +229,25 @@ class PlateReader:
 
         self._colors: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         self._widths: dict[int, list[float]] = defaultdict(list)
+        # Number of frames a COLOUR was actually read for this track. Distinct
+        # from len(_widths), which counts every plate detection including the
+        # sub-20px ones no colour is read from — see color_of.
+        self._color_n: dict[int, int] = defaultdict(int)
         self._texts: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        # Plate boxes located in the MOST RECENT frame only. Keeping them across
+        # frames made the overlay draw a plate rectangle at the position it was
+        # last seen for the rest of the vehicle's life — a box detached from its
+        # vehicle, drifting backwards down the road. Plate detection is
+        # intermittent at this scale, so "no box this frame" is the normal case
+        # and drawing nothing is the honest answer.
         self._boxes: dict[int, tuple[int, int, int, int]] = {}
         self._cache: dict[int, str] = {}
+        # Plate HEIGHT per track. Height is what OCR actually needs — characters
+        # are ~55% of it — and width alone is misleading: a 94px-wide detection
+        #17px tall carries the same 9px characters as a 34px plate.
+        self._heights: dict[int, list[float]] = defaultdict(list)
         self.detections = 0
+        self.rejected_shape = 0
 
     # --- geometry ---------------------------------------------------------------
     def _find_plates_frame(self, frame: np.ndarray, imgsz: int
@@ -232,6 +281,9 @@ class PlateReader:
         Plates are detected once across the frame and then matched to vehicles by
         containment, rather than each vehicle being cropped and searched.
         """
+        # Boxes are per-frame (see _boxes): clear before this frame's detections
+        # so box_of() can never hand the annotator a position from a past frame.
+        self._boxes.clear()
         if det.tracker_id is None or not len(det):
             return
         for pb in self._find_plates_frame(frame, imgsz):
@@ -276,8 +328,16 @@ class PlateReader:
         pw, ph = px2 - px1, py2 - py1
         if pw < 8 or ph < 4:
             return
+        # Shape gate — see MIN_PLATE_ASPECT. Rejecting here rather than at draw
+        # time matters: a badge accepted as a plate votes on the vehicle's plate
+        # COLOUR, is picked as the best crop for OCR, and is fused with the real
+        # plate views, corrupting all three.
+        if not (MIN_PLATE_ASPECT <= pw / max(ph, 1) <= MAX_PLATE_ASPECT):
+            self.rejected_shape += 1
+            return
         self.detections += 1
         self._widths[tid].append(float(pw))
+        self._heights[tid].append(float(ph))
         self._boxes[tid] = (px1, py1, px2, py2)
         # Offer this view to the best-frame selector. It keeps only the top few
         # per vehicle, so the expensive super-resolution pass is spent on the
@@ -305,15 +365,16 @@ class PlateReader:
         # A bigger, brighter sample is better evidence — same weighting principle
         # the class vote uses.
         self._colors[tid][name] += pw * max(vv, 1.0) / 255.0
+        self._color_n[tid] += 1
         self._cache.pop(tid, None)
 
         if self.ocr is not None and pw >= self.min_px_for_ocr:
             try:
-                text, conf = self.ocr(plate)
+                text, text_conf = self.ocr(plate)
             except Exception:                         # pragma: no cover
                 return
             if text:
-                self._texts[tid][text] += float(conf)
+                self._texts[tid][text] += float(text_conf)
 
     # --- resolution -------------------------------------------------------------
     def color_of(self, tid: int) -> str:
@@ -326,8 +387,13 @@ class PlateReader:
         real = {k: v for k, v in votes.items() if k not in ("unknown", "white")}
         # Require a few consistent samples before naming a category — one frame
         # of a red brake light bleeding onto the band is not a red plate.
+        #
+        # The count is of COLOUR readings, not of plate detections. Gating on
+        # len(_widths) let a track with three sub-20px detections (from which no
+        # band is ever read) and a single colour sample name a category on that
+        # one frame — exactly the evidence this gate exists to demand more of.
         pool = real or votes
-        if sum(1 for _ in self._widths.get(tid, [])) < MIN_SAMPLES:
+        if self._color_n.get(tid, 0) < MIN_SAMPLES:
             return "unknown"
         best = max(pool, key=pool.get)
         self._cache[tid] = best
@@ -345,27 +411,59 @@ class PlateReader:
         w = self._widths.get(int(tid)) or []
         return float(np.percentile(w, 90)) if w else 0.0
 
+    def plate_px_best(self, tid: int) -> float:
+        """Widest view of this plate — what OCR actually gets to work with.
+
+        The p90 above describes the typical detection, most of which are distant.
+        Feasibility depends on the BEST view, and reporting only the p90
+        understated it by ~40% on this clip.
+        """
+        w = self._widths.get(int(tid)) or []
+        return float(max(w)) if w else 0.0
+
+    def char_px_best(self, tid: int) -> float:
+        """Estimated character height in the best view — the binding number.
+
+        Every ANPR specification is written in character height, not plate
+        width, and the two come apart badly at steep viewing angles: a 94px-wide
+        detection 17px tall carries 9px characters, the same as a 34px plate
+        seen square-on. Egyptian glyphs occupy roughly 55% of plate height.
+        """
+        h = self._heights.get(int(tid)) or []
+        return round(float(max(h)) * 0.55, 1) if h else 0.0
+
     def box_of(self, tid: int):
         return self._boxes.get(int(tid))
 
     def _ocr_note(self, p90: float) -> str:
-        """Explain the OCR outcome, leading with resolution — the binding limit."""
+        """Explain the OCR outcome, leading with resolution — the binding limit.
+
+        Quotes the floor and the engine ACTUALLY in force. With --enhance the
+        readable floor is the fusion one (~65px, not ~100px) and the engine
+        belongs to the enhancer, so the plain single-frame wording reported a
+        harder limit than the run faced and claimed "no OCR engine is
+        configured" on a run that had one.
+        """
         if not p90:
             return "no plates measured, so OCR feasibility is undetermined"
-        if p90 < self.min_px_for_ocr:
-            short = self.min_px_for_ocr / max(p90, 1e-6)
+        fused = self.enhancer is not None
+        floor = MIN_PX_FOR_FUSED_OCR if fused else self.min_px_for_ocr
+        how = " with multi-frame fusion" if fused else ""
+        has_engine = self.ocr is not None or (
+            fused and getattr(self.enhancer, "ocr", None) is not None)
+        if p90 < floor:
+            short = floor / max(p90, 1e-6)
             return (
-                f"plate p90 {p90:.0f}px is below the {self.min_px_for_ocr:.0f}px "
-                f"floor for character recognition (~{short:.1f}x short); this is a "
+                f"plate p90 {p90:.0f}px is below the {floor:.0f}px floor for "
+                f"character recognition{how} (~{short:.1f}x short); this is a "
                 "camera-resolution limit, not a model limit — more training data "
                 "cannot add pixels the sensor never captured "
                 "(see tools/plate_footage_check.py)"
             )
-        if self.ocr is None:
-            return (f"plate p90 {p90:.0f}px clears the "
-                    f"{self.min_px_for_ocr:.0f}px floor, but no OCR engine is "
-                    "configured — this footage COULD be read")
-        return f"plate p90 {p90:.0f}px >= {self.min_px_for_ocr:.0f}px floor — OCR ran"
+        if not has_engine:
+            return (f"plate p90 {p90:.0f}px clears the {floor:.0f}px floor, but "
+                    "no OCR engine is configured — this footage COULD be read")
+        return f"plate p90 {p90:.0f}px >= {floor:.0f}px floor{how} — OCR ran"
 
     def summary(self, tracks, classifier=None, lane_of=None,
                 display_id=None) -> dict:
@@ -408,6 +506,9 @@ class PlateReader:
                 "agrees_with_class": (None if not code or not COLOR_TO_CODES.get(c)
                                       else code in COLOR_TO_CODES[c]),
                 "plate_px": round(px, 1),
+                "plate_px_best": round(self.plate_px_best(tid), 1),
+                # The number every ANPR spec is actually written in.
+                "char_px_best": self.char_px_best(tid),
                 "plate_text": text,
                 "plate_text_confidence": round(tconf, 2),
                 **({"enhance": enh} if enh else {}),
@@ -421,10 +522,28 @@ class PlateReader:
             "model": "trained" if self.model is not None else "heuristic fallback",
             "model_error": self.load_error,
             "plates_detected": self.detections,
+            # Detections thrown out for not being plate-shaped (tailgate badges,
+            # light bars). A large number here is not a problem being hidden — it
+            # is false positives that used to reach the colour vote and the OCR.
+            "rejected_wrong_shape": self.rejected_shape,
             "plate_px_p90": p90,
+            "plate_px_best": round(max((r["plate_px_best"] for r in rows),
+                                       default=0.0), 1),
+            "char_px_best": round(max((r["char_px_best"] for r in rows),
+                                      default=0.0), 1),
+            # 20px is the ANPR industry minimum character height; 15px the
+            # absolute floor below which no vendor claims a read.
+            "char_px_required": 20.0,
             "color_mix": dict(mix),
-            "ocr_attempted": self.ocr is not None,
+            "ocr_attempted": self.ocr is not None or self.enhancer is not None,
             "ocr_produced_text": ocr_ran,
+            # The floor actually in force, so a reader (and tools/export_plates_csv)
+            # never has to guess which one applied. The enhanced pipeline uses a
+            # much lower raw-crop floor because fusion+voting is what tests the
+            # read, so quoting the single-frame floor for an --enhance run
+            # reported "not attempted" for plates that were in fact attempted.
+            "ocr_min_px": (self.enhancer.min_px if self.enhancer is not None
+                           else self.min_px_for_ocr),
             # The whole point of the resolution note: an empty OCR column must be
             # attributable, or it reads as a broken model and sends the next two
             # weeks into collecting more training data that cannot help.
@@ -436,6 +555,7 @@ class PlateReader:
             "ocr_note": self._ocr_note(p90),
             "enhance": (None if self.enhancer is None else {
                 "enabled": True,
+                "min_raw_px": self.enhancer.min_px,
                 "crops_kept_per_vehicle": self.enhancer.keep,
                 "super_resolution": self.enhancer.sr.mode if self.enhancer.sr else "off",
                 "debug_dir": str(self.enhancer.debug) if self.enhancer.debug else None,

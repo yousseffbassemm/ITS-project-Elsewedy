@@ -36,12 +36,26 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .plates import MIN_PX_FOR_FUSED_OCR
+
 # --- crop quality -----------------------------------------------------------------
 # Weights for the three quality terms. Sharpness dominates because a blurred plate
 # is unrecoverable at any size, while a slightly smaller but sharp crop often
 # reads fine. Size matters next; detector confidence least, because it measures
 # "is this a plate", not "is this plate readable".
 W_SHARP, W_SIZE, W_CONF = 0.5, 0.35, 0.15
+
+# An Egyptian civilian plate carries 3-4 Arabic-Indic digits AND 2-3 Arabic
+# letters. Fewer than five glyphs is not a partial read of a real plate, it is
+# the character detector firing on noise — so a short string is rejected outright
+# rather than published as a partial answer. Measured case: a 38px plate emitted
+# a confident two-character "٣F" that corresponded to nothing on the vehicle.
+MIN_PLATE_CHARS = 5
+
+# Crops narrower than this fraction of the best one are excluded from fusion.
+# 0.7 keeps the frames either side of the closest approach, where the plate is
+# genuinely a similar size, and drops the distant views that only add blur.
+FUSE_SCALE_TOLERANCE = 0.7
 
 
 def sharpness(img: np.ndarray) -> float:
@@ -254,9 +268,17 @@ def vote(reads: list[tuple[str, float]]) -> tuple[str, float, dict]:
          separately, so a plate can be right in five positions and uncertain in
          the sixth rather than being discarded whole.
 
-    The returned confidence is the mean per-position agreement, which is
-    deliberately harsher than the OCR's own confidence: a model can be certain
-    and wrong, but independent crops agreeing is real evidence.
+    The returned confidence is the mean per-position agreement, scaled by how
+    many independent reads actually SUPPORT the answer. Agreement alone is
+    deliberately harsher than the OCR's own confidence — a model can be certain
+    and wrong, but independent crops agreeing is real evidence — except in the
+    one case where it is not evidence at all: with a single read, every position
+    agrees with itself and the mean is 1.0 by construction.
+
+    That is not hypothetical. On a 38px plate in street_egypt.mp4 all three crop
+    reads came back empty and only the fused image produced anything; being the
+    lone read, it was published at **confidence 1.0**. Corroboration is now part
+    of the number, so an uncorroborated read can never present as certain.
     """
     reads = [(t, c) for t, c in reads if t]
     if not reads:
@@ -264,7 +286,11 @@ def vote(reads: list[tuple[str, float]]) -> tuple[str, float, dict]:
     by_len: dict[int, float] = defaultdict(float)
     for t, c in reads:
         by_len[len(t)] += c
-    best_len = max(by_len, key=by_len.get)
+    # Break an exact tie on the LONGER read rather than on whichever crop was
+    # scored first. Ties are not hypothetical with two crops of equal
+    # confidence, and dict-insertion order made the answer depend on frame
+    # ordering — the same plate could vote differently across runs.
+    best_len = max(by_len, key=lambda n: (by_len[n], n))
     same = [(t, c) for t, c in reads if len(t) == best_len]
 
     out, agreements = [], []
@@ -272,12 +298,18 @@ def vote(reads: list[tuple[str, float]]) -> tuple[str, float, dict]:
         tally: dict[str, float] = defaultdict(float)
         for t, c in same:
             tally[t[i]] += c
-        ch = max(tally, key=tally.get)
+        ch = max(tally, key=lambda k: (tally[k], k))   # deterministic on a tie
         total = sum(tally.values()) or 1.0
         out.append(ch)
         agreements.append(tally[ch] / total)
-    return ("".join(out), float(np.mean(agreements)),
+    # One read cannot corroborate itself; two is the minimum that means
+    # anything. Halving rather than zeroing keeps a lone read usable on footage
+    # where a single crop is genuinely enough, while making it impossible for it
+    # to outrank a cross-crop agreement.
+    corroboration = 1.0 if len(same) >= 2 else 0.5
+    return ("".join(out), float(np.mean(agreements)) * corroboration,
             {"reads": len(reads), "reads_at_best_length": len(same),
+             "corroboration": corroboration,
              "length_votes": {int(k): round(v, 2) for k, v in by_len.items()},
              "per_position_agreement": [round(a, 2) for a in agreements]})
 
@@ -316,6 +348,63 @@ class PlateEnhancer:
         self._seq += 1
         keep.sort(key=lambda d: -d["score"])
         del keep[self.keep:]
+
+    @staticmethod
+    def _fuse(crops: list, up: int = 3):
+        """Multi-frame fusion: align the kept crops at sub-pixel and combine.
+
+        This is the one enhancement with real information-theoretic backing.
+        Each frame of a moving vehicle samples the plate at a slightly different
+        sub-pixel offset, so aligning several onto a finer grid and robustly
+        combining them recovers genuine detail that no single frame holds — the
+        opposite of super-resolution, which invents it.
+
+        Measured on 50 real Egyptian plates degraded to a fixed width, 12-frame
+        fusion beat a single frame at every size: at 65px it lifted character
+        accuracy 78% -> 93% and fully-read plates 0 -> 30/50. It does NOT rescue
+        34px footage (12% char accuracy, 0 plates), because there is too little
+        in each frame to align — see docs/anpr-plan.md.
+
+        Returns a fused BGR image (upscaled by ``up``), or None if there are too
+        few crops to fuse.
+        """
+        usable = [c for c in crops if c["img"] is not None]
+        if len(usable) < 2:
+            return None
+        # Fuse only crops of COMPARABLE scale. Multi-frame fusion combines
+        # several samples of the same signal; a crop half the width of the best
+        # one carries a quarter of the information, and upscaling it to match
+        # contributes interpolated mush that the median then mixes into the
+        # result. Measured: vehicle #16's crops were 94, 36 and 33px wide (the
+        # 94 being a misdetected tailgate badge), and fusing them degraded the
+        # best view instead of improving it.
+        widest = max(c["w"] for c in usable)
+        usable = [c for c in usable if c["w"] >= FUSE_SCALE_TOLERANCE * widest]
+        if len(usable) < 2:
+            return None
+        imgs = [c["img"] for c in usable]
+        h = max(i.shape[0] for i in imgs)
+        w = max(i.shape[1] for i in imgs)
+        big = [cv2.resize(i, (w * up, h * up), interpolation=cv2.INTER_CUBIC)
+               for i in imgs]
+        ref = cv2.cvtColor(big[0], cv2.COLOR_BGR2GRAY).astype(np.float32)
+        aligned = [big[0]]
+        for f in big[1:]:
+            g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            warp = np.eye(2, 3, dtype=np.float32)
+            try:
+                cv2.findTransformECC(
+                    ref, g, warp, cv2.MOTION_TRANSLATION,
+                    (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-4),
+                    None, 5)
+                aligned.append(cv2.warpAffine(
+                    f, warp, (f.shape[1], f.shape[0]),
+                    flags=cv2.INTER_CUBIC + cv2.WARP_INVERSE_MAP))
+            except cv2.error:
+                aligned.append(f)                 # unalignable frame — use as-is
+        # Median across aligned frames: robust to a bad frame in a way the mean
+        # is not.
+        return np.median(np.stack(aligned), axis=0).astype(np.uint8)
 
     def resolve(self, tid: int) -> dict:
         """Run SR + OCR + voting for one track and return the final answer."""
@@ -365,8 +454,48 @@ class PlateEnhancer:
             reads.append((text, conf))
             info["reads"].append({"crop": i, "text": text, "conf": round(conf, 3),
                                   "chars": len(chars)})
+
+        # Multi-frame fused read. This is the strongest single read on adequate
+        # footage (measured +15-20 char-accuracy points over one frame), so it
+        # is weighted above any individual crop in the vote.
+        fused = self._fuse(crops)
+        if fused is not None:
+            ftext, fconf, fchars = self.ocr.read(fused)
+            if d:
+                cv2.imwrite(str(d / "fused_0.png"), fused)
+                cv2.imwrite(str(d / f"fused_1_ocr_{ftext or 'none'}.png"), fused)
+            info["fused_read"] = {"text": ftext, "conf": round(fconf, 3),
+                                  "chars": len(fchars)}
+            if ftext:
+                # 1.5x weight: the fused read has seen every kept frame at once.
+                reads.append((ftext, fconf * 1.5))
+
         text, conf, detail = vote(reads)
+        info["vote"] = detail
         info["plate_text"] = text
         info["plate_confidence"] = round(conf, 3)
-        info["vote"] = detail
+
+        # --- publish gates ---------------------------------------------------
+        # Everything above is EVIDENCE and stays in the record for inspection.
+        # These decide whether it is fit to appear as a plate number, because a
+        # plausible-looking wrong plate is far more damaging than an empty cell:
+        # it gets believed and acted on.
+        widest = max(c["w"] for c in crops)
+        reject = None
+        if len(text) < MIN_PLATE_CHARS:
+            reject = (f"read {len(text)} character(s); a real Egyptian plate has "
+                      f"at least {MIN_PLATE_CHARS}, so this is detector noise")
+        elif widest < MIN_PX_FOR_FUSED_OCR:
+            # The measured curve: at 34px, 12-frame fusion reads 0 of 50 plates.
+            # Anything this pipeline "reads" below the fusion floor is therefore
+            # not a read, whatever the vote says. See docs/anpr-plan.md §5c.
+            reject = (f"best crop {widest}px is below the "
+                      f"{MIN_PX_FOR_FUSED_OCR:.0f}px floor at which multi-frame "
+                      "fusion has been measured to read plates at all")
+        if reject:
+            info["untrusted_read"] = {"text": text, "confidence": round(conf, 3),
+                                      "rejected_because": reject}
+            info["plate_text"] = ""
+            info["plate_confidence"] = 0.0
+            info["note"] = f"read discarded — {reject}"
         return info

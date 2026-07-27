@@ -14,11 +14,15 @@ import numpy as np
 import supervision as sv
 
 from .classify import VehicleClassifier, display_name
-from .config import PERSON_CLASS, VEHICLE_CLASSES, PipelineConfig
+from .config import COCO_SCHEME, PipelineConfig
 
 
 class LineCounter:
-    def __init__(self, cfg: PipelineConfig, w: int, h: int, lane_model=None):
+    def __init__(self, cfg: PipelineConfig, w: int, h: int, lane_model=None,
+                 scheme=COCO_SCHEME):
+        # Which class ids are vehicles and which are people depends on the
+        # MODEL, not on COCO — see config.ClassScheme.
+        self.scheme = scheme
         (sx, sy), (ex, ey) = cfg.line_px(w, h)
         self.a = np.array([sx, sy], dtype=float)
         self.b = np.array([ex, ey], dtype=float)
@@ -80,10 +84,14 @@ class LineCounter:
             prev_p = self._last_pos.get(tid)
             # A point landing exactly ON the line has side 0 and no sign. Keep
             # the last non-zero side so the crossing is still seen on the next
-            # frame instead of being lost.
+            # frame instead of being lost — and hold the POSITION back with it.
+            # Advancing the position while keeping the old side pairs a side
+            # with a point it was not measured at, so the next frame
+            # interpolates the crossing from a mismatched pair and can place it
+            # past the segment's end, silently rejecting a real crossing.
             if s != 0:
                 self._last_side[tid] = s
-            self._last_pos[tid] = p
+                self._last_pos[tid] = p
             if prev is None or prev_p is None or s == 0 or prev == 0:
                 continue
             if (prev < 0) == (s < 0):
@@ -92,12 +100,12 @@ class LineCounter:
                 continue                      # already counted / crossed off the end
             self._counted.add(tid)
             direction = "in" if (prev < 0 and s > 0) else "out"
-            if cid == PERSON_CLASS:
+            if self.scheme.is_person(cid):
                 if direction == "in":
                     self.pedestrians_in += 1
                 else:
                     self.pedestrians_out += 1
-            elif cid in VEHICLE_CLASSES:
+            elif self.scheme.is_vehicle(cid):
                 self.vehicle_events[tid] = direction
                 if direction == "in":
                     self._live_in += 1

@@ -165,11 +165,17 @@ class JobStore:
 
             process_video(str(input_path), str(job.dir), cfg, cb)
             self._update(job, status="done", progress=100.0, message="done")
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
+            # BaseException, not Exception: a worker killed by KeyboardInterrupt
+            # or a MemoryError would otherwise leave the job on disk saying
+            # "processing" with nothing behind it, and the dashboard would poll
+            # it forever — the same permanent spinner reconcile_startup exists
+            # to clean up, but for a server that never restarts.
             self._update(
                 job, status="error", message="failed",
                 error=f"{exc}\n{traceback.format_exc()[-1500:]}",
             )
+            raise
 
 
 store = JobStore()

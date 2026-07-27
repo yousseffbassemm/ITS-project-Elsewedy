@@ -83,11 +83,23 @@ yolo detect train model=yolov8s.pt data=data.yaml imgsz=736 epochs=100 \
 - **Report** per-class metrics next to the current heuristic baseline to show the lift.
 
 ## 7. Deployment (drop-in)
-The pipeline is already class-agnostic, so shipping the model is a 2-line change:
-1. Put `best.pt` in the project and set `ITS_MODEL=best.pt`.
-2. In `pipeline/classify.py`, switch `_map` to a **direct index→code lookup** (the
-   model already emits A/C/D/E/G/V/F) and delete the heuristic. Counting, speed,
-   lanes and the dashboard need **no other change** — they read class codes.
+Put `best.pt` in the project and set `ITS_MODEL=best.pt`. That is the whole
+change: `classify.native_code_map` recognises a model that emits the mentor
+taxonomy (the test is whether it knows **C** or **V**, which COCO cannot express)
+and `config.scheme_for_codes` derives the class scheme every other stage uses, so
+the size heuristic is bypassed automatically and nothing else needs editing.
+
+> This used to be less true than it read. Counting, speed, congestion and the
+> re-id class gate each hard-coded the COCO ids, so a 7-class model — whose class
+> 0 is **A**, not *person* — had every private car counted as a **pedestrian**,
+> and **G** and **F** dropped from the counts, the speed sample and the occupancy
+> measure entirely. All four now take their class meanings from
+> `config.ClassScheme`; `tests/test_pipeline.py` covers each class end to end.
+
+Name the classes so the mapping is unambiguous — `A`/`C`/`D`/`E`/`G`/`V`/`F`, or
+descriptive names (`private car`, `light truck`, `panel van`, …) which
+`classify._NAME_TO_CODE` also accepts. A name outside that vocabulary makes the
+model fall back to the COCO path, which will not fit it.
 
 ## 8. Milestones
 | Phase | Output | Rough effort |

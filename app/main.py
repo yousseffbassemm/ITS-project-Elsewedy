@@ -37,7 +37,27 @@ BASE = Path(__file__).resolve().parent.parent
 WEB = BASE / "web"
 DATA = BASE / "data" / "jobs"
 
-MAX_UPLOAD_MB = int(os.getenv("ITS_MAX_UPLOAD_MB", "500"))
+
+def _num(name: str, default, cast):
+    """Numeric env var, falling back to the default if it is not a number.
+
+    A typo in .env (ITS_IMGSZ=736px) used to raise inside the upload handler, so
+    every upload returned a bare 500 with the real cause only in the server log.
+    A malformed tuning knob should not take the app down — say so and carry on
+    with the default.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        print(f"[config] ignoring {name}={raw!r}: not a number, using {default}",
+              flush=True)
+        return default
+
+
+MAX_UPLOAD_MB = _num("ITS_MAX_UPLOAD_MB", 500, int)
 ALLOWED_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 VIDEO_MIME = {
     ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
@@ -79,9 +99,9 @@ def _flag(name: str, default: bool) -> bool:
 def _cfg() -> PipelineConfig:
     cfg = PipelineConfig()
     cfg.model = os.getenv("ITS_MODEL", cfg.model)
-    cfg.imgsz = int(os.getenv("ITS_IMGSZ", cfg.imgsz))
-    cfg.frame_stride = max(int(os.getenv("ITS_FRAME_STRIDE", cfg.frame_stride)), 1)
-    cfg.conf = float(os.getenv("ITS_CONF", cfg.conf))
+    cfg.imgsz = _num("ITS_IMGSZ", cfg.imgsz, int)
+    cfg.frame_stride = max(_num("ITS_FRAME_STRIDE", cfg.frame_stride, int), 1)
+    cfg.conf = _num("ITS_CONF", cfg.conf, float)
     cfg.stable_ids = _flag("ITS_STABLE_IDS", cfg.stable_ids)
     cfg.roi_gated_tracking = _flag("ITS_ROI_GATED", cfg.roi_gated_tracking)
     cfg.plates = _flag("ITS_PLATES", cfg.plates)

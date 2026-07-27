@@ -23,9 +23,8 @@ import supervision as sv
 
 from .classify import MENTOR_CLASSES, VehicleClassifier
 from .config import (
+    COCO_SCHEME,
     CONGESTION_COLORS,
-    PERSON_CLASS,
-    VEHICLE_CLASSES,
     PipelineConfig,
 )
 from .congestion import CongestionMonitor
@@ -41,12 +40,12 @@ ProgressCb = Optional[Callable[[float, str], None]]
 
 
 def _labels(det: sv.Detections, speeds: dict[int, float], classifier,
-            detector=None) -> list[str]:
+            detector=None, scheme=COCO_SCHEME) -> list[str]:
     out = []
     for i in range(len(det)):
         cid = int(det.class_id[i])
         tid = int(det.tracker_id[i]) if det.tracker_id is not None else -1
-        code = "P" if cid == PERSON_CLASS else classifier.resolve(tid)
+        code = "P" if scheme.is_person(cid) else classifier.resolve(tid)
         # Show the sequential display number, not the internal id. Until a track
         # is confirmed it has no number yet, so label it by class alone rather
         # than flashing an id that may be about to merge away.
@@ -148,10 +147,15 @@ def process_video(
     frame_repeat = stride
 
     detector = VehicleDetector(cfg, fps, frame_size=(w, h))
+    # The detector knows whether the loaded model speaks COCO or the mentor
+    # taxonomy; every stage below takes its class meanings from that one place
+    # rather than assuming COCO ids. Without this a fine-tuned 7-class model
+    # counts private cars (its class 0) as PEDESTRIANS. See config.ClassScheme.
+    scheme = detector.scheme
     lane_model = LaneModel(cfg, w, h)
-    counter = LineCounter(cfg, w, h, lane_model)
-    speed = SpeedEstimator(cfg, w, h, fps, stride)
-    congestion = CongestionMonitor(cfg, w, h)
+    counter = LineCounter(cfg, w, h, lane_model, scheme=scheme)
+    speed = SpeedEstimator(cfg, w, h, fps, stride, scheme=scheme)
+    congestion = CongestionMonitor(cfg, w, h, scheme=scheme)
 
     # The classifier reuses the speed homography to turn pixels into metres,
     # which is what lets it tell a pickup from a lorry.
@@ -176,7 +180,24 @@ def process_video(
         print(f"[plates] super-resolution: {sr.mode}"
               f"{'' if not sr.error else ' — ' + sr.error}")
         print(f"[plates] OCR: {'loaded' if ocr_engine.model else ocr_engine.error}")
-    plates = (PlateReader(cfg.plate_model, min_px_for_ocr=cfg.plate_ocr_min_px,
+
+    # Single-frame OCR engine, for a run without --enhance. cfg.plate_ocr_model
+    # (ITS_PLATE_OCR_MODEL) was previously read from the environment and then
+    # never used, so the setting docs/anpr-plan.md §6 tells operators to set did
+    # nothing at all and OCR could only ever run via the enhance path.
+    frame_ocr = None
+    if cfg.plates and cfg.plate_ocr_model and not cfg.plate_enhance:
+        from .plate_ocr import EgyptianPlateOCR
+        engine = EgyptianPlateOCR(cfg.plate_ocr_model)
+        if engine.model is None:
+            print(f"[plates] OCR weights not loaded: {engine.error}")
+        else:
+            print(f"[plates] OCR: loaded {cfg.plate_ocr_model}")
+            # PlateReader wants a callable returning (text, confidence); the
+            # engine also returns per-character detail the reader has no use for.
+            frame_ocr = lambda crop: engine.read(crop)[:2]  # noqa: E731
+    plates = (PlateReader(cfg.plate_model, ocr=frame_ocr,
+                          min_px_for_ocr=cfg.plate_ocr_min_px,
                           enhancer=enhancer)
               if cfg.plates else None)
 
@@ -263,7 +284,8 @@ def process_video(
                     frame = box.annotate(frame, vis)
                     frame = label.annotate(
                         frame, vis,
-                        labels=_labels(vis, speeds, classifier, detector))
+                        labels=_labels(vis, speeds, classifier, detector,
+                                       scheme))
             if plates is not None and cfg.draw_plates and len(det):
                 _draw_plates(frame, det, plates)
             if cfg.draw_counting_line:
@@ -421,6 +443,7 @@ def process_video(
                              if any(lane_counts) and max(lane_counts) else 0.0,
     }
 
+    counting_summary = counter.summary(classifier)
     analytics = {
         "video": {
             "filename": Path(input_path).name,
@@ -435,7 +458,7 @@ def process_video(
             "frame_stride": stride,
             "wall_seconds": round(time.time() - t0, 1),
         },
-        "counting": counter.summary(classifier),
+        "counting": counting_summary,
         "tracking": {
             "tracker": "ByteTrack + re-identification",
             "stable_ids": cfg.stable_ids,
@@ -464,7 +487,7 @@ def process_video(
            if plates is not None else {}),
         "timeseries": timeseries,
         "class_scheme": {c: n for c, (n, _) in MENTOR_CLASSES.items()},
-        "class_distribution": counter.summary(classifier)["by_class"],
+        "class_distribution": counting_summary["by_class"],
         "peak_traffic_second": peak_sec,
         "calibration": {
             "calibrated": cfg.calibrated,
@@ -506,6 +529,9 @@ def main():
     ap.add_argument("--plates", action="store_true",
                     help="enable the licence-plate stage (detection + colour)")
     ap.add_argument("--plate-model", default=None)
+    ap.add_argument("--plate-ocr-model", default=None,
+                    help="character-recognition weights for single-frame OCR "
+                         "(ignored with --enhance, which uses plate_alpr_model)")
     ap.add_argument("--enhance", action="store_true",
                     help="best-crop selection + super-resolution + voted OCR")
     ap.add_argument("--keep-crops", type=int, default=None)
@@ -530,6 +556,9 @@ def main():
         cfg.plates = True
     if args.plate_model:
         cfg.plate_model = args.plate_model
+    if args.plate_ocr_model:
+        cfg.plates = True
+        cfg.plate_ocr_model = args.plate_ocr_model
     if args.enhance:
         cfg.plates = True
         cfg.plate_enhance = True

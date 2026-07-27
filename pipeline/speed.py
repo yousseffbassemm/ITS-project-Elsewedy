@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 import supervision as sv
 
-from .config import VEHICLE_CLASSES, PipelineConfig
+from .config import COCO_SCHEME, PipelineConfig
 
 # Only trust speed while the vehicle's ground point is in this image-y band
 # (fractions of frame height). The lower bound excludes the far field, where a
@@ -66,8 +66,12 @@ class ViewTransformer:
 
 
 class SpeedEstimator:
-    def __init__(self, cfg: PipelineConfig, w: int, h: int, fps: float, frame_stride: int):
+    def __init__(self, cfg: PipelineConfig, w: int, h: int, fps: float,
+                 frame_stride: int, scheme=COCO_SCHEME):
         self.cfg = cfg
+        # Which class ids count as vehicles depends on the model — see
+        # config.ClassScheme.
+        self.scheme = scheme
         self.h = h
         self.transformer = ViewTransformer(cfg.source_px(w, h), cfg.target_px())
         self.fps = fps
@@ -90,7 +94,7 @@ class SpeedEstimator:
         metric = self.transformer.transform_points(anchors)
         for i, tid in enumerate(det.tracker_id):
             cid = int(det.class_id[i])
-            if cid not in VEHICLE_CLASSES:
+            if not self.scheme.is_vehicle(cid):
                 continue
             y_frac = anchors[i][1] / self.h
             if not (RELIABLE_Y_MIN <= y_frac <= RELIABLE_Y_MAX):
@@ -143,6 +147,7 @@ class SpeedEstimator:
                 "calibrated": self.cfg.calibrated, "avg_kmh": 0.0, "median_kmh": 0.0,
                 "max_kmh": 0.0, "p85_kmh": 0.0, "n_vehicles_timed": 0,
                 "histogram": {"bins": [], "counts": []}, "by_class_avg_kmh": {},
+                "per_vehicle": {},
             }
         # Bins must reach the fastest vehicle, or fast vehicles are counted in
         # n_vehicles_timed but silently dropped from the chart and the counts no
@@ -172,4 +177,9 @@ class SpeedEstimator:
             "by_class_avg_kmh": {
                 k: round(float(np.mean(v)), 1) for k, v in by_class.items()
             },
+            # Per-vehicle speeds, keyed by track id. Published because the
+            # aggregates above cannot be joined back to a specific vehicle, and
+            # the plate export needs exactly that — it reports one row per
+            # vehicle and was silently emitting a blank speed column without it.
+            "per_vehicle": {str(tid): round(sp, 1) for tid, sp in veh.items()},
         }

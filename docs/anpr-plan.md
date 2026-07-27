@@ -18,7 +18,15 @@ Three capabilities, three very different floors:
 |---|---|---|
 | plate **detection** | ~20 px plate width | a findable bright rectangle |
 | plate **colour** | ~20 px | dominant hue of a large flat band |
-| plate **OCR** | **~100 px** | individual glyph strokes must be resolved |
+| plate **OCR**, one frame | **~100 px** | individual glyph strokes must be resolved |
+| plate **OCR**, multi-frame fusion | **~65 px** | sub-pixel offsets across frames recover some of them |
+
+> The two OCR rows were originally one, quoting ~100 px throughout. §5c measures
+> the curve properly: multi-frame fusion reaches at 65 px the accuracy a single
+> frame needs 100 px for. Both floors are constants in `pipeline/plates.py`
+> (`MIN_PX_FOR_OCR`, `MIN_PX_FOR_FUSED_OCR`) and `tools/plate_footage_check`
+> reports against both. **Neither changes the conclusion for this footage** —
+> 34 px is below both, and fusion scores 12% there.
 
 Measured on `samples/street_egypt.mp4` (1280x720) — the clip the whole pipeline is
 calibrated for — by three independent methods that agree:
@@ -297,8 +305,10 @@ Judge the two capabilities separately, because one of them is footage-limited.
   differ mainly in value and are the pairs the codec damages most
 
 **Plate OCR** (footage-limited — state the condition with the result)
-- on footage meeting the ~100 px floor: character accuracy >= 0.90, full-plate
-  exact match >= 0.75
+- on footage meeting the ~100 px single-frame floor: character accuracy >= 0.90,
+  full-plate exact match >= 0.75
+- on footage meeting the ~65 px fusion floor, run with `--enhance`: character
+  accuracy >= 0.90, full-plate exact match >= 0.55 (measured 93.1% / 30-of-50)
 - on `street_egypt.mp4`: **expected to produce nothing**, and the report says why.
   Do not tune against this clip — it cannot be fixed from the model side.
 
@@ -377,15 +387,155 @@ never captured.
 
 ---
 
+## 5c. The real fix, measured: multi-frame fusion + a higher-resolution source
+
+Two avenues were not properly exhausted earlier and have now been implemented and
+measured against ground truth, rather than argued about.
+
+### Multi-frame fusion actually works — it just needs a starting resolution
+
+Real multi-frame fusion (align several frames of the same plate at sub-pixel
+precision with ECC, robustly combine onto a finer grid) uses REAL data from the
+different sub-pixel offsets each frame samples, unlike single-frame
+super-resolution which hallucinates. `pipeline/plate_ocr.PlateEnhancer._fuse`
+implements it, and the fused read is weighted above any single crop in the vote.
+
+Measured on 50 real Egyptian plates (EALPR), ground truth = the OCR's own read at
+native ~190px, degraded to a fixed width with realistic per-frame sub-pixel
+shift + sensor noise + JPEG q40:
+
+![resolution curve](img/resolution_curve.png)
+
+| plate width | single frame | 12-frame fusion | plates read exactly |
+|---|---|---|---|
+| **34px (this footage)** | 4.1% | 12.1% | **0 / 50** |
+| 50px | 46.2% | 66.7% | 11 / 50 |
+| 65px | 77.8% | **93.1%** | 30 / 50 |
+| 80px | 89.5% | 97.9% | 41 / 50 |
+| 100px | 95.8% | 99.5% | 48 / 50 |
+
+Three conclusions, all measured:
+
+* Fusion adds **15-20 character-accuracy points** at every size — real recovered
+  detail. Dismissing it earlier was wrong.
+* The reading threshold is **~50-65px, not 100px**. The pipeline starts reading
+  at 50px and is solid at 65px. This is lower than previously stated.
+* **34px is genuinely unreadable even with fusion** (0/50). Independently
+  confirmed by WINK Engineering's production test of 2,000 crops: single-frame
+  neural SR scored 0.4% character accuracy, and their working numbers (multi-crop
+  voting, 92%) are all on 40-100px crops.
+
+### The source footage is a compressed re-encode, not the camera original
+
+`ffprobe` on samples/street_egypt.mp4:
+
+    Video: h264 (Constrained Baseline), 1280x720, 2053 kb/s, 25 fps
+    encoder: Lavc62.16.100 libx264   major_brand: qt
+
+The `libx264` encoder tag and **Constrained Baseline** profile mean this file was
+re-encoded (a sharing/compatibility export), not written by a camera. **2 Mbps for
+720p is heavily compressed** — a camera original runs 4-8+ Mbps, and low bitrate
+destroys exactly the high-frequency detail plate characters are made of.
+
+### The actionable fix
+
+Get the **original recording** from whoever supplied this clip. Mapping the source
+resolution onto the measured curve above:
+
+| original camera | plate width | fusion result |
+|---|---|---|
+| this 720p re-encode | 34px | unreadable |
+| 1080p source | ~51px | 20-67% read |
+| 1440p / 4MP source | ~68px | **~60% read, 93% char accuracy — a working system** |
+
+The full pipeline (detection -> best-crop selection -> multi-frame fusion -> voted
+OCR) is built and validated. It reads plates the moment they clear ~50px, which a
+higher-resolution or less-compressed source delivers. No model training is
+involved; this is a capture-quality problem with a measured threshold.
+
+---
+
+## 5d. The last lead, and why plate WIDTH was the wrong metric
+
+Everything above measures plate **width**. That is the wrong number, and chasing
+the one remaining hope for readable plates on this clip is what exposed it.
+
+The reported 34 px is a **p90 across all detections**, most of which are distant.
+The *best* view of a vehicle is much larger, and feasibility depends on the best
+view — so the p90 understated what OCR actually had to work with by ~40%. Ranking
+every vehicle by its best crop found one at **94 px**, comfortably above the 65 px
+fusion floor. That should have been a readable plate.
+
+It was the **CHEVROLET badge** on a pickup's tailgate.
+
+![the 94px "plate"](img/plate_94px_is_a_badge.png)
+
+94 x 17 px — a 5.5:1 strip where an Egyptian plate is 2:1. Bright, sharp,
+horizontal and high-contrast, so `crop_score` ranked it the **best crop of the
+whole clip** (0.872), spent super-resolution on it, and fused it with that
+vehicle's two genuine plate views, degrading them. It also inflated
+`plate_px_p90`, making the footage look more readable than it is.
+
+Three consequences, all now fixed:
+
+* **Shape is a gate.** `MIN_PLATE_ASPECT`/`MAX_PLATE_ASPECT` (1.5–4.5:1) reject
+  it while keeping every real plate measured here (2.6, 2.9, 3.1:1). The band is
+  deliberately generous upward: a plate seen from a steep angle foreshortens
+  vertically and its aspect ratio *rises*.
+* **Fusion must be scale-consistent.** `_fuse` upscaled every crop to the widest
+  one, so a 33 px view was interpolated up to sit beside a 94 px one and the
+  median blended mush into the best frame. Crops below
+  `FUSE_SCALE_TOLERANCE` x the widest are now excluded.
+* **Report character height.** A 94 x 17 detection carries the same ~9 px
+  characters as a 34 px plate seen square-on. Width is what made a badge look
+  promising; `char_px_best` is the number every ANPR specification is written in.
+
+### The real ceiling, measured
+
+With badges excluded, the largest genuine plates in `street_egypt.mp4` are
+54 x 21, 46 x 16 and 43 x 14 px. Characters occupy ~55% of plate height:
+
+| | value |
+|---|---|
+| best real plate | **54 x 21 px** |
+| character height, best view | **11.6 px** |
+| ANPR industry minimum | **20 px** |
+| absolute floor claimed by any vendor | 15 px |
+
+Independent cross-check on a completely different metric: this camera resolves
+**381 px per lane** against an industry minimum of 700 and a recommended 1440.
+
+### The gates are load-bearing, and the measurement proves it
+
+Raising `plate_keep_crops` to 12 (which is correct — the +15–20 point fusion gain
+was measured with twelve frames) gave the character detector four times as many
+chances to fire on noise. On the full clip **17 of 18 vehicles produced a
+candidate string**, every one of them garbage. All 17 were discarded by the
+publish gates and `plate_text` came out empty for all 18.
+
+Without those gates this run would have published **seventeen fabricated
+Egyptian plate numbers**, several at high confidence. That is the single
+strongest argument in this document for gating the *call* and the *publication*
+rather than trusting a model's own certainty.
+
+---
+
 ## 6. Deployment
 
 The stage is already wired to degrade rather than fail: with no weights present,
 `PlateReader` reports the reason and the rest of the analytics are unaffected.
 
 ```powershell
+$env:ITS_PLATES="1"
 $env:ITS_PLATE_MODEL="models/plate_detect.pt"
-$env:ITS_PLATE_OCR_MODEL="models/plate_ocr.pt"
+$env:ITS_PLATE_OCR_MODEL="models/plate_ocr.pt"   # single-frame OCR
 ```
+
+`ITS_PLATE_OCR_MODEL` selects the character model for **single-frame** OCR, gated
+at `plate_ocr_min_px`. The `--enhance` pipeline uses `plate_alpr_model` instead
+and ignores this setting. (Until recently this variable was read and then never
+used, so single-frame OCR could not run at all — fixed, with the CLI equivalent
+`--plate-ocr-model`.)
 
 `analytics.json` gains a `plates` block: per-vehicle colour, the classes that
 colour supports, measured plate pixel width, and — always — an `ocr_note` stating

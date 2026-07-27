@@ -32,19 +32,17 @@ from collections import Counter, deque
 import cv2
 import numpy as np
 
-# Coarse class groups for the re-id gate. Base YOLO flip-flops between car,
-# truck and bus on the SAME vehicle from frame to frame (measured on this clip:
-# one lorry was labelled bus in 61 frames and truck in 315), so demanding an
-# exact class match would block legitimate re-attachments. Grouping keeps the
-# gate meaningful — a motorcycle still can never be stitched to a lorry — while
-# tolerating the detector's own instability.
-_CLASS_GROUP = {1: 0, 3: 0,          # bicycle, motorcycle  -> two-wheeler
-                2: 1, 5: 1, 7: 1,    # car, bus, truck      -> four-wheeler+
-                0: 2}                # person
+from .config import COCO_SCHEME, UNGROUPED
+
+# Coarse class groups for the re-id gate live in config.ClassScheme, because a
+# model fine-tuned on the mentor taxonomy uses different class ids for the same
+# concepts and the gate has to follow it. This module-level helper is the COCO
+# case, kept for callers that have no scheme to hand.
+_CLASS_GROUP = dict(COCO_SCHEME.groups)
 
 
 def _group(cls: int) -> int:
-    return _CLASS_GROUP.get(int(cls), -1)
+    return COCO_SCHEME.group(cls)
 
 
 def _iou(a, b) -> float:
@@ -78,9 +76,10 @@ def _hist(frame: np.ndarray, xyxy) -> np.ndarray | None:
 
 class _Track:
     __slots__ = ("cid", "last_frame", "pos", "vel", "hist", "area", "cls",
-                 "_recent", "_votes")
+                 "_recent", "_votes", "_group_of")
 
-    def __init__(self, cid: int, frame_idx: int, pos, area, cls, hist):
+    def __init__(self, cid: int, frame_idx: int, pos, area, cls, hist,
+                 group_of=_group):
         self.cid = cid
         self.last_frame = frame_idx
         self.pos = np.asarray(pos, dtype=float)
@@ -88,7 +87,8 @@ class _Track:
         self.hist = hist
         self.area = float(area)
         self.cls = int(cls)
-        self._votes: Counter = Counter([_group(cls)])
+        self._group_of = group_of
+        self._votes: Counter = Counter([group_of(cls)])
         self._recent: deque = deque(maxlen=6)
         self._recent.append((frame_idx, self.pos.copy()))
 
@@ -108,7 +108,7 @@ class _Track:
         self.pos = pos
         self.area = float(area)
         self.cls = int(cls)
-        self._votes[_group(cls)] += 1
+        self._votes[self._group_of(cls)] += 1
         if hist is not None:
             # Rolling blend keeps the descriptor current as lighting/scale change
             # without letting one bad crop overwrite the vehicle's appearance.
@@ -127,7 +127,11 @@ class IdStabilizer:
                  strong_frac: float = 0.30, strong_cap_px: float = 40.0,
                  dup_iou: float = 0.60, dup_ground_frac: float = 0.35,
                  dup_frames: int = 2, dup_gap: int = 5,
-                 display_delay: int | None = None):
+                 display_delay: int | None = None, scheme=COCO_SCHEME):
+        # Class groups come from the detector's own scheme: a fine-tuned model
+        # numbers its classes differently, and gating on COCO ids there would
+        # put private cars in the pedestrian group and motorcycles nowhere.
+        self.scheme = scheme
         self.max_gap = max(int(round(fps * max_gap_sec)), 1)
         self.base_tol = base_tol_px
         self.tol_growth = tol_growth_px
@@ -201,6 +205,17 @@ class IdStabilizer:
             return self._display[cid]
         return None
 
+    def resolve_id(self, cid: int) -> int:
+        """Public: the surviving canonical id for ``cid`` after any merges.
+
+        Anything that BUCKETS data by track id while the video plays needs this
+        at the end. A merge decided at frame 900 does not retroactively re-key
+        rows already filed under the id that lost, so without a final resolve
+        pass one vehicle appears as two — which is exactly how the harvested
+        crop set ended up with more identities than there were vehicles.
+        """
+        return self._resolve(int(cid))
+
     def _resolve(self, cid: int) -> int:
         """Follow the alias chain to the surviving id (with path compression)."""
         root = cid
@@ -248,7 +263,8 @@ class IdStabilizer:
                 if a == b:
                     continue
                 ta, tb = self._tracks.get(a), self._tracks.get(b)
-                if ta is None or tb is None or ta.group != tb.group:
+                if (ta is None or tb is None or ta.group != tb.group
+                        or ta.group == UNGROUPED):
                     continue
                 ba, bb = xyxy[i], xyxy[j]
                 if _iou(ba, bb) < self.dup_iou:
@@ -285,7 +301,12 @@ class IdStabilizer:
             gap = frame_idx - tr.last_frame
             if not (0 < gap <= self.max_gap):
                 continue
-            if tr.group != _group(cls):
+            grp = self.scheme.group(cls)
+            # UNGROUPED means "this class says nothing about what the vehicle
+            # is" (mentor F / an id the scheme does not know). Two unidentified
+            # blobs agreeing on being unidentified is not evidence, so they must
+            # not satisfy the gate by both being -1.
+            if grp == UNGROUPED or tr.group != grp:
                 continue                       # class group must agree
             ratio = max(area, 1.0) / max(tr.area, 1.0)
             if not (1.0 / self.max_area_ratio <= ratio <= self.max_area_ratio):
@@ -331,7 +352,8 @@ class IdStabilizer:
                 if cid is None:
                     cid = self._next_cid
                     self._next_cid += 1
-                    self._tracks[cid] = _Track(cid, frame_idx, pos, area, cls, hist)
+                    self._tracks[cid] = _Track(cid, frame_idx, pos, area, cls,
+                                               hist, self.scheme.group)
                 else:
                     self.stitches += 1
                     self._tracks[cid].update(frame_idx, pos, area, cls, hist)
@@ -344,7 +366,8 @@ class IdStabilizer:
                 hist = _hist(frame, box) if (frame_idx % 5 == 0) else None
                 tr = self._tracks.get(cid)
                 if tr is None:
-                    self._tracks[cid] = _Track(cid, frame_idx, pos, area, cls, hist)
+                    self._tracks[cid] = _Track(cid, frame_idx, pos, area, cls,
+                                               hist, self.scheme.group)
                 else:
                     tr.update(frame_idx, pos, area, cls, hist)
             out[i] = cid

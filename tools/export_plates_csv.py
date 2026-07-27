@@ -43,28 +43,63 @@ COLOR_ARABIC = {
 }
 
 FIELDS = [
-    "vehicle_no", "track_id", "vehicle_class", "vehicle_class_name",
+    # `row_no` is a clean 1..N index over the vehicles in THIS table;
+    # `vehicle_no` is the number drawn on the annotated video. They differ, and
+    # both are wanted: the table should not appear to skip a vehicle, and the
+    # reader must still be able to find that vehicle on the video.
+    #
+    # They diverge for two legitimate reasons. A vehicle can be numbered on
+    # screen and never cross the counting line, so it is absent from this
+    # (counted-only) table; and when the re-id layer merges two numbered ids the
+    # higher number is retired, leaving a gap in the on-video sequence. The run's
+    # own `tracking.contiguous_from_1` flag reports whether that happened.
+    "row_no", "vehicle_no", "track_id", "vehicle_class", "vehicle_class_name",
     "plate_color", "plate_category", "plate_category_ar", "supports_classes",
-    "agrees_with_class", "plate_width_px", "plate_text",
-    "plate_text_confidence", "ocr_status", "crops_used", "reads_agreeing",
-    "lane", "speed_kmh",
+    "agrees_with_class", "plate_width_px", "plate_width_best_px",
+    # The number every ANPR specification is actually written in, and the one
+    # that decides whether characters are recoverable at all.
+    "char_height_px", "char_height_required_px",
+    "plate_text", "plate_text_confidence", "ocr_status",
+    "crops_used", "reads_agreeing", "lane", "speed_kmh",
 ]
 
 
-def ocr_status(plate_px: float, text, ocr_attempted: bool) -> str:
-    """Why this row's plate_text is what it is."""
+def ocr_status(vehicle: dict, plates: dict) -> str:
+    """Why this row's plate_text is what it is.
+
+    Decided from what the RUN actually did, not from a fixed threshold. The
+    previous version always quoted the 100 px single-frame floor, so an
+    --enhance run — whose raw-crop floor is 12 px, because fusion and
+    cross-crop voting are what test the read — reported "not attempted" for
+    every plate it had in fact attempted three times over. That is the one
+    misstatement this column exists to prevent.
+    """
+    text = vehicle.get("plate_text")
     if text:
         return "read"
+    plate_px = float(vehicle.get("plate_px") or 0.0)
     if not plate_px:
         return "no plate located"
-    if plate_px < MIN_PX_FOR_OCR:
+
+    # The enhanced pipeline records per-vehicle exactly what it did.
+    enh = vehicle.get("enhance") or {}
+    if enh.get("reads"):
+        return (f"attempted on {len(enh['reads'])} best crop(s)"
+                + (" + fused" if enh.get("fused_read") else "")
+                + " — no confident reading")
+    if enh.get("note"):
+        return f"not attempted — {enh['note']}"
+
+    if not plates.get("ocr_attempted"):
+        return "not attempted — no OCR engine configured"
+    # Fall back to the floor the run reports, not a constant compiled in here.
+    floor = float(plates.get("ocr_min_px") or MIN_PX_FOR_OCR)
+    if plate_px < floor:
         # The single most important cell in the table. An empty plate_text with
         # no explanation reads as a broken model, and that misreading is what
         # sends a team off to collect training data that cannot help.
         return (f"not attempted — plate {plate_px:.0f}px is below the "
-                f"{MIN_PX_FOR_OCR:.0f}px floor (camera limit, not model limit)")
-    if not ocr_attempted:
-        return "not attempted — no OCR engine configured"
+                f"{floor:.0f}px floor (camera limit, not model limit)")
     return "attempted — no confident reading"
 
 
@@ -77,20 +112,28 @@ def rows_from(analytics: dict) -> list[dict]:
             "  python -m pipeline.process_video --input <clip> "
             "--output-dir <dir> --plates")
 
-    ocr_attempted = bool(plates.get("ocr_attempted"))
     # Speed and lane are reported per vehicle elsewhere in the report; index them
     # so the plate table can carry the context a reader needs to act on a row.
+    # `per_vehicle` is emitted by speed.summary(); reports produced before it
+    # existed simply leave the speed column blank rather than failing.
     speeds = {int(k): v for k, v in
               (analytics.get("speed", {}).get("per_vehicle") or {}).items()}
 
+    required = float(plates.get("char_px_required") or 20.0)
+    # Order by the number a reader sees on the video, so the table and the
+    # footage can be followed side by side.
+    vehicles = sorted(plates.get("vehicles", []),
+                      key=lambda v: (v.get("vehicle_no") is None,
+                                     v.get("vehicle_no") or 0))
     out = []
-    for n, v in enumerate(plates.get("vehicles", []), start=1):
+    for n, v in enumerate(vehicles, start=1):
         tid = int(v["track"])
         color = v.get("plate_color", "unknown")
         px = float(v.get("plate_px") or 0.0)
         text = v.get("plate_text")
         out.append({
-            "vehicle_no": v.get("vehicle_no") or n,
+            "row_no": n,
+            "vehicle_no": v.get("vehicle_no") or "",
             "track_id": tid,
             "vehicle_class": v.get("vehicle_class", ""),
             "vehicle_class_name": display_name(v["vehicle_class"])
@@ -102,9 +145,12 @@ def rows_from(analytics: dict) -> list[dict]:
             "agrees_with_class": ("" if v.get("agrees_with_class") is None
                                   else ("yes" if v["agrees_with_class"] else "NO")),
             "plate_width_px": round(px, 1),
+            "plate_width_best_px": v.get("plate_px_best", ""),
+            "char_height_px": v.get("char_px_best", ""),
+            "char_height_required_px": required,
             "plate_text": text or "",
             "plate_text_confidence": v.get("plate_text_confidence") or "",
-            "ocr_status": ocr_status(px, text, ocr_attempted or bool(v.get("enhance"))),
+            "ocr_status": ocr_status(v, plates),
             "crops_used": (v.get("enhance") or {}).get("crops_kept", ""),
             "reads_agreeing": ((v.get("enhance") or {}).get("vote") or {})
                               .get("reads_at_best_length", ""),

@@ -160,6 +160,13 @@ def main() -> int:
         f"path: {out.as_posix()}\ntrain: train/images\nval: val/images\n"
         "names:\n  0: plate\n")
 
+    if not widths:
+        # Nothing was written, so data.yaml above points at empty splits and a
+        # train run would fail much later with a confusing message.
+        raise SystemExit(
+            f"no usable images: {stats['skipped']} of {len(imgs)} were skipped. "
+            f"Check --src points at '{Path(args.src).name}' with its 'Vehicles' "
+            "and 'Vehicles Labeling' subfolders.")
     widths = np.array(widths)
     print(f"train {stats['train']}  val {stats['val']}  skipped {stats['skipped']}")
     print(f"  scaled-to-deployment {stats['scaled']}   kept-native {stats['native']}")

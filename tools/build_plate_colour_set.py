@@ -95,6 +95,14 @@ def stage_features(src: Path, out: Path) -> int:
             rejected[why] = rejected.get(why, 0) + 1
             continue
         rows.append({"file": f.name, **features(im), "label": ""})
+    if not rows:
+        # Every candidate was rejected — almost always a wrong --src pointing at
+        # whole-vehicle photos rather than plate crops. Say that, instead of an
+        # IndexError from rows[0] three lines down.
+        raise SystemExit(
+            f"none of the {len(files)} images in {src} are usable plate crops "
+            f"({rejected}). Check --src points at the PLATES dataset, not the "
+            "vehicles one.")
     out.mkdir(parents=True, exist_ok=True)
     with open(out / "features.csv", "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))

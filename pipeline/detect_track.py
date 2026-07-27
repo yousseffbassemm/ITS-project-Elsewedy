@@ -13,7 +13,7 @@ import supervision as sv
 from ultralytics import YOLO
 
 from .classify import native_code_map
-from .config import PERSON_CLASS, VEHICLE_CLASSES, PipelineConfig
+from .config import PERSON_CLASS, VEHICLE_CLASSES, PipelineConfig, scheme_for_codes
 from .reid import IdStabilizer
 
 # Scene-tuned ByteTrack settings shipped with the project (longer track_buffer
@@ -101,9 +101,14 @@ class VehicleDetector:
             # Classes we ask YOLO to return: vehicles + pedestrians.
             self._classes = sorted(set(VEHICLE_CLASSES) | {PERSON_CLASS})
             self.vehicle_ids = set(VEHICLE_CLASSES)
+        # Single source of truth for "which class id means what" — every stage
+        # downstream (counting, speed, occupancy, the re-id class gate) takes it
+        # from here rather than assuming COCO. See config.ClassScheme.
+        self.scheme = scheme_for_codes(self.native_codes)
         # ByteTrack does the frame-to-frame association; this re-attaches a
         # vehicle that was lost for longer than track_buffer to its original id.
-        self.stabilizer = (IdStabilizer(fps, max(cfg.frame_stride, 1))
+        self.stabilizer = (IdStabilizer(fps, max(cfg.frame_stride, 1),
+                                        scheme=self.scheme)
                            if cfg.stable_ids else None)
         # Unbiased tracking-health counters. Measured on RAW detections, before
         # any tracker filtering, so a stride at which association is failing
@@ -115,7 +120,15 @@ class VehicleDetector:
         # silently discard most of the traffic.
         self.roi_kept = 0
         self._roi_mask = None
-        if cfg.roi_gated_tracking and frame_size is not None:
+        # Built whenever the frame size is known, NOT only when the gate is
+        # armed. `roi_gated_tracking` decides whether detections are FILTERED;
+        # the mask itself is also what on_roadway() answers with, and a caller
+        # that turns the gate off to collect the opposite carriageway as
+        # training data still needs to know which carriageway each vehicle was
+        # on. Building it only when gating was on silently labelled every
+        # vehicle 'analysed'.
+        self._roi_gate = bool(cfg.roi_gated_tracking)
+        if frame_size is not None:
             w, h = frame_size
             m = np.zeros((h, w), dtype=np.uint8)
             cv2.fillPoly(m, [cfg.roi_px(w, h)], 1)
@@ -158,7 +171,7 @@ class VehicleDetector:
         # ByteTrack still sees the whole frame (it needs unbroken motion history),
         # but everything downstream — ids, counting, annotation — is restricted to
         # the analysed carriageway.
-        if len(det):
+        if len(det) and self._roi_gate:
             det = det[self._on_roadway(det)]
         self.roi_kept += len(det)
         if self.stabilizer is not None and len(det):
@@ -210,6 +223,27 @@ class VehicleDetector:
         """
         return (self.roi_kept / self.confirmed_detections
                 if self.confirmed_detections else 1.0)
+
+    def resolve_id(self, tracker_id: int) -> int:
+        """Canonical id after all merges — see IdStabilizer.resolve_id."""
+        if self.stabilizer is None:
+            return int(tracker_id)
+        return self.stabilizer.resolve_id(tracker_id)
+
+    def on_roadway(self, xyxy) -> bool:
+        """Is this box's ground point on the analysed carriageway?
+
+        Exposed so a caller that deliberately runs with the ROI gate OFF (the
+        dataset harvester wants the opposite carriageway too, as training data)
+        can still LABEL which carriageway each vehicle came from rather than
+        silently mixing them.
+        """
+        if self._roi_mask is None:
+            return True
+        h, w = self._roi_mask.shape
+        gx = int(np.clip((float(xyxy[0]) + float(xyxy[2])) / 2, 0, w - 1))
+        gy = int(np.clip(float(xyxy[3]), 0, h - 1))
+        return bool(self._roi_mask[gy, gx])
 
     def display_id(self, tracker_id: int) -> int | None:
         """Sequential on-screen number for a vehicle (see IdStabilizer)."""
