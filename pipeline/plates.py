@@ -160,7 +160,14 @@ SAT_ABSOLUTE_FLOOR = 30.0
 
 
 def classify_band(h: float, s: float, v: float,
-                  s_body: float = 0.0, v_body: float = 255.0) -> str:
+                  s_body: float = 0.0, v_body: float = 255.0) -> str:  # noqa: ARG001
+    # `v_body` is accepted and deliberately NOT used. Every caller measures it
+    # anyway (it comes free from the same median as s_body), and it is the
+    # obvious next signal if this rule ever needs hardening — a very dark plate
+    # body means the crop is underexposed and the saturation comparison below is
+    # on thin ice. It is not used today because that behaviour has not been
+    # measured, and adding an untested branch to the one colour rule that does
+    # work is a bad trade. Keeping the parameter keeps the call sites ready.
     """Plate colour from the band's HSV, judged AGAINST the plate's own body.
 
     Absolute saturation thresholds do not survive this footage. The measured red

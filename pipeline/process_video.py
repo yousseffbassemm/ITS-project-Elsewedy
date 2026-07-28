@@ -679,7 +679,7 @@ def main():
                              or cfg.vehicle_cls_model)
     if args.vehicle_cls_every:
         cfg.vehicle_cls_every = args.vehicle_cls_every
-    # ANPR cascade. Same env vars the web app reads — CLAUDE.md §4 records what
+    # ANPR cascade. Same env vars the web app reads — CLAUDE.md §5 records what
     # it costs when the two entry points disagree about a setting.
     if args.anpr or os.getenv("ITS_ANPR", "").lower() in ("1", "true", "yes"):
         cfg.anpr = True

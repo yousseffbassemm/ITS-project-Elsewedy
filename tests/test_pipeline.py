@@ -1243,7 +1243,7 @@ def test_undersized_plate_is_never_published() -> None:
     """Below the glyph-height floor there is nothing to read, whatever came back.
 
     This is the gate that stands between this project and the failure recorded
-    in CLAUDE.md §4, where relaxing fusion produced a confident plate string for
+    in CLAUDE.md §5, where relaxing fusion produced a confident plate string for
     17 of 18 vehicles and every one was garbage.
     """
     # Laid out as the plate physically is — digits on the left, letters on the
@@ -1266,7 +1266,7 @@ def test_a_lone_frame_read_is_never_certified() -> None:
 
     Reading the same plate in several frames is real evidence; reading it once
     is not, yet a single read scores 100% agreement with itself by construction.
-    CLAUDE.md §4 records the version of this that shipped: an uncorroborated
+    CLAUDE.md §5 records the version of this that shipped: an uncorroborated
     plate published at confidence 1.0.
     """
     chars = [{"glyph": g, "x": i, "conf": 0.9} for i, g in enumerate("٧١٢٦نطس")]

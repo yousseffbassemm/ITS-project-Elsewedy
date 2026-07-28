@@ -82,8 +82,17 @@ def geometric_estimate(cfg: PipelineConfig, w: int, h: int,
 
 
 def empirical_estimate(video: Path, cfg: PipelineConfig, max_frames: int,
-                       plate_w_m: float) -> tuple[float, int]:
-    """Widest vehicle boxes actually seen -> implied plate width in px."""
+                       plate_w_m: float) -> tuple[float, int]:  # noqa: ARG001
+    """Widest vehicle boxes actually seen -> implied plate width in px.
+
+    `plate_w_m` is accepted and deliberately NOT used: this estimate scales the
+    observed vehicle width by a plate/vehicle RATIO instead, so it shares no
+    input with the geometric estimate above. That independence is the point —
+    docs/anpr-plan.md §1 rests on three methods agreeing (34 / 38 / 34 px), and
+    an agreement between two calculations fed the same constant would prove
+    nothing. The parameter stays so both estimators present one interface to
+    the caller.
+    """
     from ultralytics import YOLO
 
     cap = cv2.VideoCapture(str(video))

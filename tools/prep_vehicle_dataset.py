@@ -33,7 +33,7 @@ the mentor's taxonomy needs:
 260,518 cars against 9,679 vans. Trained on that, the cheapest way to a high
 score is to answer "car" — which is the behaviour being replaced. Capping every
 class to the same ceiling costs data on the classes that have plenty and buys
-per-class accuracy on the classes the report is actually about. CLAUDE.md §3
+per-class accuracy on the classes the report is actually about. CLAUDE.md §4
 records the opposite mistake: tripling class C without re-checking the others
 lifted C and cost 12 points overall.
 
@@ -100,7 +100,7 @@ def _utf8_stdout() -> None:
             pass
 
 
-def extract(tar_path: Path, cap: int, seed: int) -> dict[str, list[Path]]:
+def extract(tar_path: Path, cap: int) -> dict[str, list[Path]]:
     """Stream the tar and write capped, mapped crops to a staging directory.
 
     Streamed rather than unpacked: the archive is 3.1 GB and only the ~40k
@@ -124,7 +124,7 @@ def extract(tar_path: Path, cap: int, seed: int) -> dict[str, list[Path]]:
             # Count EVERY folder before deciding whether to keep it. Counting
             # only the mapped ones made the "folders actually seen" listing
             # below omit the folders that were skipped — which is exactly the
-            # listing CLAUDE.md §4 requires, printed in a form that could not
+            # listing CLAUDE.md §5 requires, printed in a form that could not
             # reveal a dataset whose real contents differ from its docs.
             seen[parts[-2]] += 1
             code = MIOTCD_TO_CODE.get(parts[-2])
@@ -211,12 +211,12 @@ def main() -> int:
             "  curl -L -C - -o data/vehicle_ext/MIO-TCD-Classification.tar \\\n"
             "    https://tcd.miovision.com/static/dataset/MIO-TCD-Classification.tar")
 
-    kept = extract(tar_path, args.cap, args.seed)
+    kept = extract(tar_path, args.cap)
     if not kept:
         raise SystemExit(
             "no images extracted — the archive layout is not train/<class>/<id>.jpg "
             "as expected. Print the real listing before trusting any dataset's "
-            "documentation (CLAUDE.md §4).")
+            "documentation (CLAUDE.md §5).")
     split = split_and_write(kept, args.val_frac, args.seed)
     test = write_deployment_test()
 
@@ -229,7 +229,7 @@ def main() -> int:
     else:
         print("  test  : none — data/dataset/manifest.csv not found, so there is "
               "no deployment-camera\n          test set and any score below will "
-              "be in-domain only. See CLAUDE.md §4.")
+              "be in-domain only. See CLAUDE.md §5.")
     missing = sorted({c for c in MIOTCD_TO_CODE.values() if c} - set(split["train"]))
     if missing:
         print(f"  [CHECK] no training images for {missing}")

@@ -23,7 +23,7 @@ possible at all.
                               --stage3 models/plate_chars.pt
 
 **This is an in-domain number.** EALPR is close-up photography; the deployment
-camera is 720p CCTV at 30 m. CLAUDE.md §4 records a plate detector that scored
+camera is 720p CCTV at 30 m. CLAUDE.md §5 records a plate detector that scored
 mAP50 0.985 here and regressed on real footage. Treat this as "does the cascade
 work at all", never as "this is what it will do on the street".
 """

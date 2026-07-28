@@ -186,7 +186,7 @@ def train(epochs: int, imgsz: int, batch: int, device: str, base: str,
     )
     # Colab reclaims runtimes without warning and takes /content with it. A
     # Drive-backed project dir means best.pt survives a disconnect; this cost
-    # three training runs before it was done. See CLAUDE.md §4.
+    # three training runs before it was done. See CLAUDE.md §5.
     if project:
         kwargs["project"] = project
     model.train(**kwargs)

@@ -130,7 +130,7 @@ MIN_LETTERS, MIN_DIGITS = 2, 2
 
 # Character height below which recognition is not attempted. This is the
 # industry ANPR minimum and the number the whole plate-resolution finding in
-# CLAUDE.md §3 is written in — 20 px of glyph, not of plate.
+# CLAUDE.md §4 is written in — 20 px of glyph, not of plate.
 MIN_CHAR_PX = 15.0
 
 # Confidence floor for one character detection to join the string.

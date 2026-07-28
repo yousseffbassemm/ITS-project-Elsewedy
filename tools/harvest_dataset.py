@@ -207,7 +207,7 @@ def _scan(video: Path, cfg: PipelineConfig, per_track: int, gate: bool):
     return merged, merged_roi, merged_first, counted, clf
 
 
-def _write(video: Path, merged, first, counted, clf, tag_fn, carriageway,
+def _write(video: Path, merged, counted, clf, tag_fn, carriageway,
            rows: list[dict]) -> None:
     """Write one pass's crops and manifest rows."""
     for t, items in merged.items():
@@ -255,7 +255,7 @@ def harvest(video: Path, cfg: PipelineConfig, per_track: int,
         no = vehicle_no.get(t)
         return no, (f"v{no:04d}" if no else f"a{t:04d}")
 
-    _write(video, merged, first, counted, clf, _analysed_tag, "analysed", rows)
+    _write(video, merged, counted, clf, _analysed_tag, "analysed", rows)
     n_analysed = len(vehicle_no)
 
     n_opp = 0
@@ -298,7 +298,7 @@ def harvest(video: Path, cfg: PipelineConfig, per_track: int,
             print(f"  {video.name}: dropped {len(drop)} opposite-pass "
                   f"track(s) that duplicate an analysed vehicle", flush=True)
         off = {t: v for t, v in off.items() if t not in drop}
-        _write(video, off, first2, set(), clf2,
+        _write(video, off, set(), clf2,
                lambda t: (None, f"x{t:04d}"), "opposite", rows)
         n_opp = len(off)
 

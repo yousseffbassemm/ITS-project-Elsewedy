@@ -110,7 +110,7 @@ def _cfg() -> PipelineConfig:
     cfg.plate_ocr_model = os.getenv("ITS_PLATE_OCR_MODEL", cfg.plate_ocr_model)
     # ANPR cascade. Kept in step with pipeline/process_video.main(): a setting
     # honoured by one entry point and ignored by the other looks like "the model
-    # did not help" rather than "the model never loaded". See CLAUDE.md §4.
+    # did not help" rather than "the model never loaded". See CLAUDE.md §5.
     cfg.anpr = _flag("ITS_ANPR", cfg.anpr)
     cfg.anpr_stage2_model = os.getenv("ITS_ANPR_STAGE2", cfg.anpr_stage2_model)
     cfg.anpr_stage3_model = os.getenv("ITS_ANPR_STAGE3", cfg.anpr_stage3_model)

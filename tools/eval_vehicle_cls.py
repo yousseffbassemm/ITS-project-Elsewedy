@@ -1,6 +1,6 @@
 """Measure a vehicle classifier per VEHICLE on the deployment camera.
 
-CLAUDE.md §3 carries a table comparing the size heuristic, two trained
+CLAUDE.md §4 carries a table comparing the size heuristic, two trained
 classifiers and the hybrid — and until this script existed that table could not
 be reproduced. It was measured once, by hand, and every later decision leaned on
 numbers nobody could re-derive. A measurement that cannot be re-run is an
@@ -27,7 +27,7 @@ vehicles in the same pass, plus the hybrid of the two.
 Ground truth is the `label` column of data/dataset/manifest.csv, one label per
 (clip, track, carriageway) — never per crop, since the harvester's two passes
 number tracks independently and (clip, track) alone merges two different
-vehicles. That bug has appeared in three separate files; see CLAUDE.md §4.
+vehicles. That bug has appeared in three separate files; see CLAUDE.md §5.
 """
 from __future__ import annotations
 

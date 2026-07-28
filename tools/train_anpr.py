@@ -31,7 +31,7 @@ The deployment images are CCTV-grade — small, motion-blurred, JPEG-damaged —
 while EALPR is close-up photography. That domain gap is the single biggest risk
 in this whole approach, so photometric augmentation is turned up hard on both
 stages and the eval below is run on real footage, never only on the val split.
-See CLAUDE.md §4: a plate detector that scored mAP50 0.985 in-domain was a
+See CLAUDE.md §5: a plate detector that scored mAP50 0.985 in-domain was a
 straight regression on the deployment camera.
 """
 from __future__ import annotations
@@ -100,7 +100,7 @@ def train(stage: int, epochs: int, batch: int, device: str,
     )
     # Colab reclaims runtimes without warning and takes /content with them. A
     # Drive-backed project dir means last.pt and best.pt survive a disconnect —
-    # this cost three training runs before it was done. See CLAUDE.md §4.
+    # this cost three training runs before it was done. See CLAUDE.md §5.
     if project:
         kwargs["project"] = project
     model.train(**kwargs)
