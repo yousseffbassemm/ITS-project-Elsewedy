@@ -348,7 +348,11 @@ notebook clones the repo, so pushing is a prerequisite for training.
 * `notebooks/train_all_colab.ipynb` — all three models, one run, ~2 h on a T4.
 * Dashboard now renders the plate table; it previously omitted plates entirely.
 
-**Models on disk** (all gitignored): `models/vehicle_cls.pt` (= v1, shipped),
+**Models on disk** (all gitignored): `models/vehicle_cls.pt` (the deployed
+classifier) and `models/vehicle_cls_v1.pt` — **byte-identical today, and both
+are wanted**: the Colab run overwrites `vehicle_cls.pt`, and v1 is then the
+baseline the new model has to beat. Do not delete it as a duplicate; run
+`tools/eval_vehicle_cls.py --model` against each and compare.
 `models/vehicle_cls_v2.pt` (rejected retrain, kept as evidence),
 `models/plate_detect.pt` (stage 2 stand-in), `models/eg_alpr.pt` (stage 3
 stand-in), `models/RealESRGAN_x4.pth` (the `--enhance` fusion path).
