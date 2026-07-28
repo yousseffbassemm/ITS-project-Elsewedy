@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import random
 import shutil
-import sys
 from pathlib import Path
 
 import cv2
@@ -172,7 +171,7 @@ def main() -> int:
     print(f"  scaled-to-deployment {stats['scaled']}   kept-native {stats['native']}")
     print(f"plate width px: p10 {np.percentile(widths,10):.0f}  "
           f"median {np.median(widths):.0f}  p90 {np.percentile(widths,90):.0f}")
-    print(f"target domain (street_egypt.mp4): 20-35 px")
+    print("target domain (street_egypt.mp4): 20-35 px")
     print(f"\ndata.yaml -> {out / 'data.yaml'}")
     return 0
 

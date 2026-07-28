@@ -237,6 +237,16 @@ video { width: 100%; border-radius: 12px; background: #0d0f12; display: block; }
 .note code { background: #fff; border: 1px solid #fde3c2; border-radius: 5px; padding: 1px 5px; }
 .footer { text-align: center; color: var(--muted); font-size: 12px; padding: 34px; border-top: 1px solid var(--line); margin-top: 20px; }
 .hidden { display: none !important; }
+/* A wide table must scroll INSIDE its card. Without this the plate table (7
+   columns, one of them free text) pushes the card wider than the grid column
+   and the whole page scrolls sideways. */
+.table-scroll { overflow-x: auto; }
+.table-scroll table.mini { min-width: 560px; }
+/* The plate table's last row is just another vehicle, and its last column is a
+   pixel measurement — neither is a total, so the emphasis rules below must not
+   apply to it. */
+.table-scroll table.mini tr:last-child td { font-weight: 400; }
+.table-scroll table.mini td:last-child { color: var(--ink); font-weight: 400; }
 table.mini { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.mini td { padding: 7px 4px; border-bottom: 1px solid var(--line); }
 table.mini tr:last-child td { border-bottom: none; font-weight: 700; }

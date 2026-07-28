@@ -20,6 +20,9 @@ import supervision as sv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pipeline.anpr import (                              # noqa: E402
+    ANPRCascade, assemble, glyph_for,
+)
 from pipeline.classify import (                          # noqa: E402
     MIN_SIZE_SAMPLES, VehicleClassifier, native_code_map,
 )
@@ -1160,6 +1163,222 @@ def test_carriageway_is_labelled_even_with_the_gate_off() -> None:
     check("a vehicle off it is not", d.on_roadway(off) is False)
 
 
+# --------------------------------------------------------------------------
+# ANPR cascade
+def test_arabic_reading_order() -> None:
+    """Letters read right-to-left; the number reads left-to-right.
+
+    The single most dangerous bug in this module, because its output looks
+    entirely plausible. A plate sorted by x alone gives the letters BACKWARDS,
+    and nobody reviewing an English report notices. Ground truth here is EALPR
+    plate 0001, whose glyph positions are in the dataset.
+    """
+    chars = [{"glyph": g, "x": x, "conf": 0.9} for g, x in
+             zip("٧١٢٦نطس", [0.16, 0.26, 0.35, 0.46, 0.59, 0.73, 0.87])]
+    arabic, latin, visual, letters, digits = assemble(chars)
+    check("digits keep left-to-right order", digits == "٧١٢٦", digits)
+    check("letters are reversed into reading order", letters == "سطن", letters)
+    check("visual order is preserved separately", visual == "٧١٢٦نطس", visual)
+    check("arabic form is 'letters number'", arabic == "سطن ٧١٢٦", arabic)
+    check("latin transliteration is checkable by a non-Arabic reader",
+          latin == "STN 7126", latin)
+
+
+def test_non_character_classes_never_join_the_plate() -> None:
+    """A pretrained ALPR model also emits "License Plate" and "car" boxes.
+
+    Letting those through would append a junk glyph to every string AND push
+    short reads over the minimum-character gate, so a rejected read would start
+    publishing.
+    """
+    check("'License Plate' is not a character", glyph_for("License Plate") is None)
+    check("'car' is not a character", glyph_for("car") is None)
+    check("transliterated letters map to glyphs", glyph_for("Seen") == "س")
+    check("lowercase transliteration maps too", glyph_for("geem") == "ج")
+    check("digit names map to Arabic-Indic", glyph_for("7") == "٧")
+    check("a bare Arabic glyph maps to itself", glyph_for("م") == "م")
+
+
+def _cascade_with(chars, char_px=40.0, colour_frames=0, frames=2):
+    """An ANPRCascade pre-loaded with evidence, with no models involved.
+
+    Evidence goes in through the real vote path rather than by poking the
+    dictionaries, so these tests exercise the code that actually runs. Poking
+    `_texts` directly used to leave the assembled forms empty, which made every
+    publish-gate test pass for the wrong reason — the gate rejected a plate that
+    had no letters because the fixture never built them.
+    """
+    c = ANPRCascade(None, None)
+    tid = 1
+    for _ in range(frames if chars else 0):
+        c._vote_text(tid, chars)
+    c._char_px[tid] = char_px
+    c._plate_px[tid] = char_px / 0.55
+    c._pos[tid] = [0.5]
+    for _ in range(colour_frames):
+        c._colors[tid]["blue"] += 1.0
+        c._color_n[tid] += 1
+    return c
+
+
+def test_short_read_is_not_published() -> None:
+    """Three glyphs is the detector firing on noise, not a partial plate."""
+    chars = [{"glyph": g, "x": i, "conf": 0.9} for i, g in enumerate("م٣٤")]
+    r = _cascade_with(chars).resolve(1)
+    check("a 3-character 'plate' is not published", r.published is False)
+    check("and it carries no plate string", r.text_arabic == "")
+    check("the reason names the character count", "at least" in r.note, r.note)
+
+
+def test_read_without_enough_letters_is_not_published() -> None:
+    """An Egyptian plate is letters AND digits — five digits alone is not one."""
+    chars = [{"glyph": g, "x": i, "conf": 0.9} for i, g in enumerate("١٢٣٤٥")]
+    r = _cascade_with(chars).resolve(1)
+    check("digits with no letters are not a plate", r.published is False)
+    check("the reason names letters and digits",
+          "letter" in r.note and "digit" in r.note, r.note)
+
+
+def test_undersized_plate_is_never_published() -> None:
+    """Below the glyph-height floor there is nothing to read, whatever came back.
+
+    This is the gate that stands between this project and the failure recorded
+    in CLAUDE.md §4, where relaxing fusion produced a confident plate string for
+    17 of 18 vehicles and every one was garbage.
+    """
+    # Laid out as the plate physically is — digits on the left, letters on the
+    # right, x increasing — so the expected string exercises the reversal rather
+    # than accidentally agreeing with a naive sort.
+    chars = [{"glyph": g, "x": i, "conf": 0.9} for i, g in enumerate("٧١٢٦نطس")]
+    ok = _cascade_with(chars, char_px=40.0).resolve(1)
+    check("a real read on adequate resolution IS published", ok.published is True)
+    check("and carries the plate", ok.text_arabic == "سطن ٧١٢٦", ok.text_arabic)
+
+    bad = _cascade_with(chars, char_px=6.0).resolve(1)
+    check("the same read below the floor is not published", bad.published is False)
+    check("the reason quotes the measured height and the floor",
+          "6.0" in bad.note and "15" in bad.note, bad.note)
+    check("and no plate string survives", bad.text_arabic == "")
+
+
+def test_a_lone_frame_read_is_never_certified() -> None:
+    """One frame cannot corroborate itself.
+
+    Reading the same plate in several frames is real evidence; reading it once
+    is not, yet a single read scores 100% agreement with itself by construction.
+    CLAUDE.md §4 records the version of this that shipped: an uncorroborated
+    plate published at confidence 1.0.
+    """
+    chars = [{"glyph": g, "x": i, "conf": 0.9} for i, g in enumerate("٧١٢٦نطس")]
+    one = _cascade_with(chars, frames=1).resolve(1)
+    many = _cascade_with(chars, frames=4).resolve(1)
+    check("both reads agree on the plate", one.text_arabic == many.text_arabic)
+    check("a single read is never fully confident", one.confidence <= 0.5,
+          f"{one.confidence}")
+    check("corroborated reads outrank it", many.confidence > one.confidence,
+          f"{many.confidence} vs {one.confidence}")
+    check("the frame count is reported, not the distinct-string count",
+          many.n_reads == 4, f"{many.n_reads}")
+
+
+def test_published_plate_matches_its_confidence() -> None:
+    """The row must be built from the string that won the vote.
+
+    When frames disagree, taking the text from the best single frame while
+    taking the confidence from the vote publishes one plate carrying another
+    plate's number. The two only diverge when the reads diverge — exactly when
+    it matters.
+    """
+    good = [{"glyph": g, "x": i, "conf": 0.9} for i, g in enumerate("٧١٢٦نطس")]
+    bad = [{"glyph": g, "x": i, "conf": 0.95} for i, g in enumerate("٧١٢٥نطس")]
+    c = ANPRCascade(None, None)
+    for _ in range(3):
+        c._vote_text(1, good)          # 3 frames agree
+    c._vote_text(1, bad)               # 1 frame dissents, at higher confidence
+    c._char_px[1] = 40.0
+    r = c.resolve(1)
+    check("the majority read is published, not the most confident frame",
+          r.digits == "٧١٢٦", r.digits)
+    check("and its latin form is the same plate", r.text_latin == "STN 7126",
+          r.text_latin)
+
+
+def test_blank_plate_is_attributed_to_the_right_cause() -> None:
+    """A blank plate must name the cause that actually gated it.
+
+    Three different causes produce an identical empty cell, and confusing them
+    is expensive in a specific direction: blaming the camera when the real
+    problem is a missing model sends people off collecting footage that was
+    never the issue.
+    """
+    no_plate = ANPRCascade(None, None).resolve(1)
+    check("no plate located says so", "no plate located" in no_plate.note,
+          no_plate.note)
+
+    # Plate found, resolution fine, but no character model loaded.
+    c = ANPRCascade(None, None)
+    c._char_px[1] = 40.0
+    r = c.resolve(1)
+    check("a missing character model is not blamed on the camera",
+          "resolution limit" not in r.note, r.note)
+    check("and it names the missing model", "model is loaded" in r.note, r.note)
+
+    # Plate found, character model present, genuinely too small. The cascade
+    # treats a reader as usable only when it carries loaded weights, so the stub
+    # needs a truthy `.model` to stand in for one.
+    class _LoadedReader:
+        model = True
+
+    c = ANPRCascade(None, _LoadedReader())
+    c._char_px[1] = 6.0
+    r = c.resolve(1)
+    check("a genuinely undersized plate IS blamed on resolution",
+          "resolution limit" in r.note, r.note)
+
+
+def test_colour_needs_corroboration() -> None:
+    """One frame of a brake light bleeding onto the band is not a red plate."""
+    c = _cascade_with(None, colour_frames=2)
+    check("two colour samples are not enough", c.colour_of(1) == "unknown")
+    c = _cascade_with(None, colour_frames=3)
+    check("three agreeing samples name the category", c.colour_of(1) == "blue")
+
+
+def test_plate_position_is_reported() -> None:
+    """The mentor's 'the plate might be on the sides' must be visible per row.
+
+    Measured on EALPR, plate centre-x spans 0.03-0.96 of vehicle width, so the
+    cascade searches the whole crop — and reports where it actually found it,
+    rather than leaving a reader to assume.
+    """
+    c = ANPRCascade(None, None)
+    c._pos[1] = [0.08, 0.10]
+    check("a plate on the far left is reported as left",
+          c.resolve(1).position == "left", c.resolve(1).position)
+    c = ANPRCascade(None, None)
+    c._pos[2] = [0.93]
+    check("a plate on the far right is reported as right",
+          c.resolve(2).position == "right")
+
+
+def test_cascade_degrades_without_weights() -> None:
+    """Missing ANPR weights must never cost the run its other analytics.
+
+    Same contract as every other optional stage: report and carry on. A class
+    label or a plate is not worth losing the counts over.
+    """
+    c = ANPRCascade(None, None)
+    frame = np.zeros((H, W, 3), dtype=np.uint8)
+    c.observe(frame, 1, [100.0, 100.0, 200.0, 200.0])     # must not raise
+    r = c.resolve(1)
+    check("no locator means no plate, not a crash", r.published is False)
+    check("and the absence is attributed",
+          "no plate located" in r.note, r.note)
+    s = c.summary([1])
+    check("the summary still reports", s["plates_located"] == 0)
+    check("and says the stage was not loaded", "not loaded" in s["stage2_model"])
+
+
 def test_ocr_absence_is_explained() -> None:
     """An empty OCR column must say WHY, or it reads as a broken model.
 
@@ -1240,6 +1459,18 @@ def main() -> int:
     test_ocr_gate_blocks_hallucinated_reads()
     test_ocr_absence_is_explained()
     test_carriageway_is_labelled_even_with_the_gate_off()
+    print("anpr cascade")
+    test_arabic_reading_order()
+    test_non_character_classes_never_join_the_plate()
+    test_short_read_is_not_published()
+    test_read_without_enough_letters_is_not_published()
+    test_undersized_plate_is_never_published()
+    test_a_lone_frame_read_is_never_certified()
+    test_published_plate_matches_its_confidence()
+    test_blank_plate_is_attributed_to_the_right_cause()
+    test_colour_needs_corroboration()
+    test_plate_position_is_reported()
+    test_cascade_degrades_without_weights()
     print("congestion")
     test_congestion_needs_actual_traffic()
     test_congestion_ignores_blips()

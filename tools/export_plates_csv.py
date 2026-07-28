@@ -103,14 +103,88 @@ def ocr_status(vehicle: dict, plates: dict) -> str:
     return "attempted — no confident reading"
 
 
+# Columns for a run of the ANPR cascade. A different table from the colour-only
+# one below, because it answers a different question and padding one schema with
+# the other's empty columns is how a reader ends up believing a blank cell means
+# "no plate" when it means "this column does not apply to this run".
+ANPR_FIELDS = [
+    "row_no", "vehicle_no", "track_id", "vehicle_class", "vehicle_class_name",
+    # The plate itself, three ways. `plate_arabic` is the real answer;
+    # `plate_latin` exists so a reviewer who does not read Arabic can still
+    # check a row against the video; `plate_visual_ltr` is the raw
+    # left-to-right glyph order, which is what you see in an image viewer and
+    # is NOT the reading order.
+    "plate_arabic", "plate_latin", "plate_visual_ltr",
+    "plate_letters", "plate_digits", "plate_confidence",
+    "plate_color", "plate_category", "plate_category_ar",
+    # Where the plate sat on the vehicle. The mentor's "it might be on the
+    # sides" is a requirement, so it gets a column rather than a footnote.
+    "plate_position", "plate_position_x",
+    "char_height_px", "char_height_required_px", "plate_width_px",
+    "reads_fused", "published", "status",
+    "supports_classes", "agrees_with_class", "lane", "speed_kmh",
+]
+
+
+def anpr_rows_from(analytics: dict) -> list[dict]:
+    """One row per counted vehicle, from an ANPR cascade run."""
+    anpr = analytics["anpr"]
+    speeds = {int(k): v for k, v in
+              (analytics.get("speed", {}).get("per_vehicle") or {}).items()}
+    required = float(anpr.get("char_px_required") or 15.0)
+    vehicles = sorted(anpr.get("vehicles", []),
+                      key=lambda v: (v.get("vehicle_no") is None,
+                                     v.get("vehicle_no") or 0))
+    out = []
+    for n, v in enumerate(vehicles, start=1):
+        tid = int(v["track"])
+        color = v.get("plate_color", "unknown")
+        out.append({
+            "row_no": n,
+            "vehicle_no": v.get("vehicle_no") or "",
+            "track_id": tid,
+            "vehicle_class": v.get("vehicle_class", ""),
+            "vehicle_class_name": display_name(v["vehicle_class"])
+                                  if v.get("vehicle_class") else "",
+            "plate_arabic": v.get("plate_arabic", ""),
+            "plate_latin": v.get("plate_latin", ""),
+            "plate_visual_ltr": v.get("plate_visual_ltr", ""),
+            "plate_letters": v.get("plate_letters", ""),
+            "plate_digits": v.get("plate_digits", ""),
+            "plate_confidence": v.get("plate_confidence") or "",
+            "plate_color": color,
+            "plate_category": COLOR_DISPLAY.get(color, color),
+            "plate_category_ar": COLOR_ARABIC.get(color, ""),
+            "plate_position": v.get("plate_position", ""),
+            "plate_position_x": v.get("plate_position_x", ""),
+            "char_height_px": v.get("char_height_px", ""),
+            "char_height_required_px": required,
+            "plate_width_px": v.get("plate_width_px", ""),
+            "reads_fused": v.get("reads_fused", ""),
+            "published": "yes" if v.get("published") else "no",
+            # Never leave a blank plate unexplained: an empty cell with no
+            # reason reads as a broken model, and that misreading is what sends
+            # a team off collecting training data that cannot help.
+            "status": v.get("note") or ("read" if v.get("plate_arabic") else ""),
+            "supports_classes": "/".join(v.get("supports_classes") or []),
+            "agrees_with_class": ("" if v.get("agrees_with_class") is None
+                                  else ("yes" if v["agrees_with_class"] else "NO")),
+            "lane": v.get("lane", ""),
+            "speed_kmh": speeds.get(tid, ""),
+        })
+    return out
+
+
 def rows_from(analytics: dict) -> list[dict]:
     plates = analytics.get("plates")
     if not plates:
         raise SystemExit(
-            "This analytics.json has no `plates` block — the run was made without\n"
-            "the plate stage. Re-run with --plates:\n"
-            "  python -m pipeline.process_video --input <clip> "
-            "--output-dir <dir> --plates")
+            "This analytics.json has neither an `anpr` nor a `plates` block — the "
+            "run was made\nwith no plate stage at all. Re-run with one of:\n"
+            "  python -m pipeline.process_video --input <clip> --output-dir <dir> "
+            "--anpr\n      (cascade: vehicle -> plate -> characters + colour)\n"
+            "  python -m pipeline.process_video --input <clip> --output-dir <dir> "
+            "--plates\n      (frame-level plate detection + colour only)")
 
     # Speed and lane are reported per vehicle elsewhere in the report; index them
     # so the plate table can carry the context a reader needs to act on a row.
@@ -166,23 +240,45 @@ def main() -> int:
     ap.add_argument("job_dir", help="a job directory containing analytics.json")
     ap.add_argument("--out", default=None, help="default: <job_dir>/plates.csv")
     args = ap.parse_args()
+    # The summary below can carry Arabic; the Windows console is cp1252 and
+    # would raise on it after the CSV had already been written correctly.
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
 
     job = Path(args.job_dir)
     src = job / "analytics.json" if job.is_dir() else job
     if not src.exists():
         raise SystemExit(f"not found: {src}")
-    analytics = json.loads(src.read_text())
-    rows = rows_from(analytics)
+    analytics = json.loads(src.read_text(encoding="utf-8"))
+    # A cascade run is the richer table and takes precedence; a colour-only run
+    # falls back to the original schema.
+    use_anpr = bool(analytics.get("anpr"))
+    rows = anpr_rows_from(analytics) if use_anpr else rows_from(analytics)
+    fields = ANPR_FIELDS if use_anpr else FIELDS
 
     dest = Path(args.out) if args.out else (job if job.is_dir() else job.parent) / "plates.csv"
     # utf-8-sig: Excel opens a plain utf-8 CSV as mojibake and the Arabic column
     # is the whole point of having it.
     with open(dest, "w", newline="", encoding="utf-8-sig") as fh:
-        w = csv.DictWriter(fh, fieldnames=FIELDS)
+        w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
 
     print(f"{len(rows)} vehicles -> {dest}")
+    if use_anpr:
+        a = analytics["anpr"]
+        print(f"  architecture     : {a.get('architecture')}")
+        print(f"  plates located   : {a.get('plates_located')} "
+              f"(in {a.get('vehicle_crops_searched')} vehicle crops)")
+        print(f"  plate colour mix : {a.get('color_mix')}")
+        read = sum(1 for r in rows if r["plate_arabic"])
+        print(f"  plates published : {read}/{len(rows)}")
+        if not read:
+            print(f"  why              : {a.get('note')}")
+        return 0
     plates = analytics["plates"]
     print(f"  plate colour mix : {plates.get('color_mix')}")
     print(f"  plate width p90  : {plates.get('plate_px_p90')} px")

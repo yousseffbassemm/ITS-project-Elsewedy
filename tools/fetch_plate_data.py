@@ -23,7 +23,6 @@ import argparse
 import csv
 import json
 import re
-import sys
 import time
 import urllib.parse
 import urllib.request

@@ -15,9 +15,15 @@ data/jobs/*
 data/dataset/
 # Downloaded plate datasets (EALPR etc). Real photographs of identifiable
 # vehicles and readable plates — personal data under Egypt PDPL 151/2020, and
-# ~280MB besides. Fetch them with tools/fetch_plate_data.py / the EALPR clone;
+# ~600MB besides. Rebuild them with
+#   git clone https://github.com/ahmedramadan96/EALPR data/plates/EALPR
+#   python -m tools.ealpr_charmap && python -m tools.build_anpr_datasets
 # never commit them, not even to a private repo.
 data/plates/
+# MIO-TCD (3.1 GB archive + the derived 7-class crop set). Photographs of
+# identifiable vehicles, CC BY-NC-SA 4.0, and far too large for git. Rebuild
+# with tools/prep_vehicle_dataset.py — the notebook does this itself on Colab.
+data/vehicle_ext/
 # YOLO weights live in the project root (Ultralytics downloads them there) as
 # well as models/ — both must be ignored, they are ~30 MB.
 *.pt

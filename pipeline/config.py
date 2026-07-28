@@ -135,6 +135,29 @@ class PipelineConfig:
     # of frames, so sampling costs almost nothing once the per-track vote runs.
     vehicle_cls_every: int = 5
 
+    # --- ANPR cascade (vehicle -> plate -> characters) ----------------------------
+    # The mentor's architecture, and the one that actually reads plates. Distinct
+    # from the `plates` stage below, which detects plates across the WHOLE frame
+    # and reads only their colour:
+    #
+    #   plates (below)  frame -> plate boxes -> colour        cheap, works at 20px
+    #   anpr (here)     vehicle crop -> plate -> characters   needs ~15px of GLYPH
+    #
+    # The cascade searches inside each tracked vehicle's crop, which spends the
+    # detector's fixed input resolution on the region that matters and scopes the
+    # answer to a known vehicle. Measured on EALPR's held-out vehicles it reads
+    # 83.5% of plates exactly, end to end — see tools/eval_anpr.py.
+    #
+    # It is OFF by default for the same reason the plate stage is: two extra
+    # inferences per vehicle per frame is felt on CPU. Turn on with ITS_ANPR=1.
+    anpr: bool = False
+    anpr_stage2_model: str = "models/plate_on_vehicle.pt"
+    anpr_stage3_model: str = "models/plate_chars.pt"
+    # Run the cascade on every Nth observation of a track. Same reasoning as
+    # vehicle_cls_every: a vehicle is visible for tens of frames and the
+    # per-track vote makes sampling nearly free.
+    anpr_every: int = 3
+
     # --- Licence plates -----------------------------------------------------------
     # Plate detection and plate COLOUR need only ~20 px of plate width and work on
     # this camera. Plate OCR needs ~100 px and does not: measured four ways, plates

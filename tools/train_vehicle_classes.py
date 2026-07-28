@@ -156,18 +156,24 @@ def prepare(manifest: Path, val_frac: float, seed: int,
 
 
 def train(epochs: int, imgsz: int, batch: int, device: str, base: str,
-          out: Path) -> int:
+          out: Path, data: Path | None = None, project: str | None = None,
+          workers: int = 8, name: str = "its7class") -> int:
     try:
         from ultralytics import YOLO
     except ImportError:
         raise SystemExit("ultralytics is not installed:  pip install ultralytics")
-    if not (CLS_DIR / "train").exists():
-        raise SystemExit(f"{CLS_DIR} not built — run --prepare first")
+    data = Path(data) if data else CLS_DIR
+    if not (data / "train").exists():
+        raise SystemExit(
+            f"{data} not built. Either:\n"
+            f"  python -m tools.prep_vehicle_dataset      (MIO-TCD, ~30k crops)\n"
+            f"  python -m tools.train_vehicle_classes --prepare   (the 194 "
+            f"hand-labelled deployment crops)")
 
     model = YOLO(base)
-    model.train(
-        data=str(CLS_DIR), epochs=epochs, imgsz=imgsz, batch=batch,
-        device=device, name="its7class", patience=15, cos_lr=True,
+    kwargs = dict(
+        data=str(data), epochs=epochs, imgsz=imgsz, batch=batch,
+        device=device, name=name, patience=15, cos_lr=True, workers=workers,
         # Vehicles are photographed from behind by a fixed camera, so a mirrored
         # car is still that car — horizontal flip is safe here and doubles the
         # data. (Unlike PLATES, where mirroring reverses reading order; see
@@ -178,12 +184,22 @@ def train(epochs: int, imgsz: int, batch: int, device: str, base: str,
         # them, so lean on photometric augmentation.
         hsv_h=0.015, hsv_s=0.6, hsv_v=0.5, erasing=0.3,
     )
+    # Colab reclaims runtimes without warning and takes /content with it. A
+    # Drive-backed project dir means best.pt survives a disconnect; this cost
+    # three training runs before it was done. See CLAUDE.md §4.
+    if project:
+        kwargs["project"] = project
+    model.train(**kwargs)
+
     best = Path(model.trainer.best)
     out.mkdir(parents=True, exist_ok=True)
-    dest = out / "vehicle_cls.pt"
+    dest = out / f"{name}.pt"
     shutil.copy(best, dest)
     print(f"\nclassifier -> {dest}")
-    print("Deploy with:  $env:ITS_VEHICLE_CLS='models/vehicle_cls.pt'")
+    print(f"Deploy with:  ITS_VEHICLE_CLS={dest.as_posix()}")
+    print("Then MEASURE it on the deployment camera, which is the only test "
+          "that has ever predicted real behaviour here:\n"
+          f"  python -m tools.eval_vehicle_cls --model {dest.as_posix()}")
     return 0
 
 
@@ -207,6 +223,15 @@ def main() -> int:
     ap.add_argument("--device", default="0")
     ap.add_argument("--base", default="yolov8s-cls.pt")
     ap.add_argument("--out", default=str(ROOT / "models"))
+    ap.add_argument("--data", default=None,
+                    help="dataset root with train/ and val/ (default: the "
+                         "harvested set; use data/vehicle_ext/cls for MIO-TCD)")
+    ap.add_argument("--project", default=None,
+                    help="Ultralytics project dir; point at Google Drive on "
+                         "Colab so a reclaimed runtime does not cost the run")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--name", default="its7class",
+                    help="run name, and the output weights filename")
     args = ap.parse_args()
 
     if not (args.prepare or args.train):
@@ -216,7 +241,10 @@ def main() -> int:
                 args.use_draft, not args.analysed_only)
     if args.train:
         return train(args.epochs, args.imgsz, args.batch, args.device,
-                     args.base, Path(args.out))
+                     args.base, Path(args.out),
+                     data=Path(args.data) if args.data else None,
+                     project=args.project, workers=args.workers,
+                     name=args.name)
     return 0
 
 

@@ -29,14 +29,21 @@ Built for the Elsewedy Electric AI-department Intelligent-Transportation-Systems
   is keyed to the vehicle ID, not to the detected class, which flickers). The
   counting line is an internal reference and is not drawn; in/out totals still
   appear in the report. Toggle with `draw_counting_line` / `draw_in_out_hud`.
-- **Licence plates** — plate detection + **plate colour**, which in Egypt encodes
-  vehicle category (red = truck, light blue = private, brown = commercial) and so
-  gives independent evidence for the hard A/C/V classes. **Plate OCR is
-  footage-limited**: ~100 px of plate width to read a single frame, or ~65 px
-  with the multi-frame fusion pipeline (`--enhance`), against the ~34 px the
-  calibrated clip provides — so it is a camera limit rather than a model one.
-  Check any clip before training with `python -m tools.plate_footage_check`. See
-  [`docs/anpr-plan.md`](docs/anpr-plan.md).
+- **Licence plates (ANPR cascade)** — `--anpr` runs
+  **vehicle → plate → characters + colour**, each arrow a separate model. The
+  plate detector searches the whole vehicle crop rather than assuming a central
+  plate, because across the training set the plate's centre spans 0.03–0.96 of
+  vehicle width. Output is one CSV row per vehicle: Arabic plate, Latin
+  transliteration, colour category, and where on the vehicle the plate was.
+  Measured **80.9% exact plates end to end** on held-out data
+  ([`docs/anpr-plan.md`](docs/anpr-plan.md)).
+  **On this project's own CCTV it correctly reads nothing** — glyphs are 6–11 px
+  against a 15 px floor — and says so per row rather than inventing a number.
+  That is a camera limit, not a model limit; check any clip first with
+  `python -m tools.plate_footage_check`.
+- **Plate colour** works where characters do not (it needs ~20 px, not ~100 px).
+  In Egypt the band encodes vehicle category — red = truck, blue = private,
+  orange = taxi — so it is independent evidence for the hard A/C/V classes.
 - **Dashboard** — drag-drop upload → live progress → annotated video + KPIs +
   charts (volume, vehicle mix, speed histogram, directional flow, lane analytics,
   congestion timeline). Full-screen, Elsewedy-branded. Export to PDF from the browser.
@@ -80,24 +87,37 @@ Instead of exporting variables each time, copy `.env.example` to `.env` and edit
 the app loads it at startup. Variables already set in the shell take precedence.
 
 ### Vehicle class scheme (mentor taxonomy)
-Detections are mapped to: **A** Private car · **C** Light truck · **D** Heavy truck ·
-**E** Bus · **G** Motorcycle · **V** Van · **F** Unknown. A/D/E/G are produced
-reliably from base YOLO; **C** and **V** need a model fine-tuned on the 7 classes
-(v1 maps to the nearest reliable class — see `docs/methodology.md`).
+**A** Private car · **C** Light truck · **D** Heavy truck · **E** Bus ·
+**G** Motorcycle · **V** Van · **F** Unknown.
+
+Base COCO has four vehicle classes against these seven, and cannot express
+**C** or **V** at all — every van is a "car" and every pickup a "truck" to it.
+A second-stage classifier over each tracked crop supplies the missing classes;
+it trains on MIO-TCD, ~30k traffic-camera crops that carry `work_van` and
+`pickup_truck` as real labels. Where the classifier lands on C-or-D, the
+monocular frontal-area estimate decides which, because a pickup and a lorry look
+alike from behind and differ mainly in size.
+
+```powershell
+$env:ITS_VEHICLE_CLS="models/vehicle_cls.pt"
+```
 
 ## Run the pipeline directly (no web UI)
 ```bash
 .venv\Scripts\python -m pipeline.process_video \
-  --input samples\vehicles_12s.mp4 --output-dir data\jobs\demo \
-  --model yolov8n.pt --imgsz 480 --stride 2
+  --input samples\street_egypt.mp4 --output-dir data\jobs\demo \
+  --anpr --vehicle-cls models\vehicle_cls.pt
 ```
-Outputs `annotated.mp4` + `analytics.json` in the output dir.
+Outputs `annotated.mp4` + `analytics.json`. Then the deliverable table:
+```bash
+.venv\Scripts\python -m tools.export_plates_csv data\jobs\demo
+```
 
 ## Tests
 ```powershell
 .venv\Scripts\python -m tests.test_pipeline
 # optionally cross-check a produced report for internal consistency:
-.venv\Scripts\python -m tests.test_pipeline data\jobs\street_v2\analytics.json
+.venv\Scripts\python -m tests.test_pipeline data\jobs\hybrid\analytics.json
 ```
 No pytest needed. Every test encodes a bug that was actually found and fixed —
 counting that broke at `frame_stride` 2–4, speed that emitted nothing at high
@@ -133,27 +153,38 @@ between two ground marks is better still. See `docs/methodology.md` §3.4.
 ## Layout
 ```
 pipeline/   detect_track · reid · counting · classify · lanes · speed · congestion
-            plates · video_writer · process_video · config · bytetrack.yaml
+            anpr · plates · plate_ocr · video_writer · process_video · config
 app/        FastAPI backend (main) + background job runner (jobs)
 web/        index.html · results.html · theme.css · app.js · vendor/chart.min.js
-data/jobs/  per-job artifacts (input, annotated.mp4, analytics.json)
+data/jobs/  per-job artifacts (input, annotated.mp4, analytics.json, plates.csv)
 docs/       methodology.md · finetuning-plan.md · anpr-plan.md
-notebooks/  train_plates_colab.ipynb (thin Colab driver; logic is in tools/)
-tools/      harvest_dataset · plate_footage_check · train_plates
+notebooks/  train_all_colab.ipynb — trains all three models on a Colab GPU
+tools/      dataset prep (build_anpr_datasets · prep_vehicle_dataset · ealpr_charmap)
+            training  (train_anpr · train_vehicle_classes)
+            measuring (eval_anpr · eval_vehicle_cls · plate_footage_check)
+            export    (export_plates_csv · harvest_dataset)
 samples/    demo clips
 ```
 
 ## Training on a GPU (Colab)
-This machine is CPU-only, so model training happens on a free Colab GPU. The
-workflow is **edit in VS Code → push → Colab pulls**; the training logic lives in
-`tools/train_plates.py` rather than inside the notebook, so it stays lintable and
-reviewable. Open `notebooks/train_plates_colab.ipynb` in Colab and run it.
+This machine is CPU-only, so training happens on a free Colab GPU. Open
+[`notebooks/train_all_colab.ipynb`](notebooks/train_all_colab.ipynb), pick a T4
+runtime, and *Run all*. It downloads both public datasets itself, builds them,
+trains all three models and measures them — roughly two hours.
 
-Before spending GPU time on OCR, run `tools/plate_footage_check` on the target
-footage. Training cannot add pixels the sensor never captured, and an
-unreadable plate looks exactly like an undertrained model.
+The notebook clones this repo, so **push the branch first**. Training logic
+lives in `tools/` rather than inside the notebook, so it stays lintable,
+testable and reviewable; the notebook is a thin driver.
+
+Two rules the project has already paid to learn, enforced by the eval tools:
+
+* **Validate on the deployment camera, never on a val split.** A plate detector
+  scored mAP50 0.985 in-domain and was a straight regression on real footage.
+* **Check the footage before spending GPU time on OCR.** Training cannot add
+  pixels the sensor never captured, and an unreadable plate looks exactly like
+  an undertrained model. `python -m tools.plate_footage_check` measures it.
 
 ## Roadmap
-Fine-tune on Egyptian classes (tuk-tuk, microbus), plate OCR once adequate
-footage exists, violations (red-light / wrong-way), multi-camera corridor view,
-and a live/edge mode. See `docs/methodology.md` and `docs/anpr-plan.md`.
+Vehicle re-ID embedding for cross-camera matching, violations (red-light /
+wrong-way), multi-camera corridor view, and a live/edge mode. See
+`docs/methodology.md` and `docs/anpr-plan.md`.

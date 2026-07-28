@@ -84,6 +84,16 @@
         <div id="congestionRibbon" class="ribbon-wrap"></div>
         <div id="congestionSummary" style="margin-top:14px;"></div>
       </div>
+
+      <!-- Licence plates. Hidden unless the run actually had a plate stage:
+           an empty plate table on a run that never looked for plates reads as
+           "the system found nothing", which is a different and much worse
+           claim than "this was not measured". -->
+      <div class="card hidden" id="plateCard">
+        <h3>Licence plates <span class="hint" id="plateHint"></span></h3>
+        <div id="plateNote"></div>
+        <div class="table-scroll"><table class="mini" id="plateTable"></table></div>
+      </div>
     </div>
   </div>
 

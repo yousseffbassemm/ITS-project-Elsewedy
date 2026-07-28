@@ -13,6 +13,12 @@
     A: '#e30613', C: '#ff7a3d', D: '#b3000f', E: '#1f5fd0',
     G: '#17b26a', V: '#f79009', F: '#8a8f98',
   };
+  // Plate-band colours, chosen to READ as the category they name so the table
+  // explains itself without a legend. Mirrors pipeline/plates.PLATE_BGR.
+  const PLATE_COLOR = {
+    blue: '#1f5fd0', red: '#e30613', orange: '#ff7a3d', yellow: '#eab308',
+    green: '#17b26a', white: '#94a3b8', unknown: '#8a8f98',
+  };
   const codeOf = (label) => (label || '').split('·')[0].trim();
   const LEVELS = ['Free-flow', 'Moderate', 'Heavy', 'Jam'];
   const LEVEL_CLASS = { 'Free-flow': 'free', 'Moderate': 'mod', 'Heavy': 'heavy', 'Jam': 'jam' };
@@ -168,6 +174,9 @@
           cg.peak_periods.map(p => `${p.start_sec}–${p.end_sec}s (${p.level})`).join(', ') + '</div>'
         : '');
 
+    // ---- licence plates ----
+    plateTable(a);
+
     // ---- vehicle mix doughnut ----
     const mix = c.by_class || {};
     const mixLabels = Object.keys(mix), mixVals = Object.values(mix);
@@ -257,6 +266,86 @@
     }
     host.innerHTML = `<div class="ribbon">${seg}</div>
       <div class="ribbon-axis">${ticks.join('')}</div>`;
+  }
+
+  // Licence-plate table. Until now the plate block reached users only through
+  // analytics.json and the CSV, so the dashboard silently omitted a headline
+  // deliverable — the mentor's actual ask.
+  //
+  // Handles both shapes a run can produce: the ANPR cascade (`anpr`, which
+  // reads characters) and the colour-only plate stage (`plates`). They are
+  // rendered as different tables rather than one padded superset, because a
+  // blank character column means "not measured on this run" in one case and
+  // "measured and rejected" in the other.
+  function plateTable(a) {
+    const card = document.getElementById('plateCard');
+    if (!card) return;
+    const anpr = a.anpr, legacy = a.plates;
+    const block = anpr || legacy;
+    if (!block || !(block.vehicles || []).length) return;   // stays hidden
+    card.classList.remove('hidden');
+
+    const rows = block.vehicles.slice().sort(
+      (x, y) => (x.vehicle_no || 1e9) - (y.vehicle_no || 1e9));
+
+    if (anpr) {
+      const published = rows.filter(r => r.published && r.plate_arabic).length;
+      document.getElementById('plateHint').textContent =
+        `— ${block.plates_located} located in ${block.vehicle_crops_searched} ` +
+        `vehicle crops · ${published} of ${rows.length} readable`;
+      // Lead with WHY, not with the empty column. An unexplained blank reads as
+      // a broken model and sends people off collecting data that cannot help.
+      document.getElementById('plateNote').innerHTML =
+        '<div class="note"><b>' + escapeHtml(block.architecture || '') + '</b><br>' +
+        escapeHtml(block.note || '') + '</div>';
+      document.getElementById('plateTable').innerHTML =
+        '<tr><td style="color:var(--muted)">#</td>' +
+        '<td style="color:var(--muted);text-align:left">Class</td>' +
+        '<td style="color:var(--muted);text-align:left">Plate</td>' +
+        '<td style="color:var(--muted);text-align:left">Latin</td>' +
+        '<td style="color:var(--muted);text-align:left">Colour</td>' +
+        '<td style="color:var(--muted);text-align:left">Where</td>' +
+        '<td style="color:var(--muted);text-align:right">Glyph px</td></tr>' +
+        rows.map(r => {
+          // dir="rtl" so the browser lays the Arabic out correctly. Without it
+          // the string renders in the wrong direction and looks like a
+          // different plate — the same class of error the reading-order code
+          // exists to prevent, reintroduced at the last step.
+          const plate = r.plate_arabic
+            ? `<span dir="rtl" style="font-size:15px">${escapeHtml(r.plate_arabic)}</span>`
+            : `<span class="tag" title="${escapeHtml(r.note || '')}">—</span>`;
+          const short = (r.char_height_px || 0) <
+                        (block.char_px_required || 15);
+          return `<tr><td>${r.vehicle_no ?? ''}</td>` +
+            `<td style="text-align:left">${escapeHtml(r.vehicle_class || '')}</td>` +
+            `<td style="text-align:left">${plate}</td>` +
+            `<td style="text-align:left">${escapeHtml(r.plate_latin || '')}</td>` +
+            `<td style="text-align:left"><span style="color:${PLATE_COLOR[r.plate_color] || COL.text}">●</span> ` +
+            `${escapeHtml(r.plate_color || '')}</td>` +
+            `<td style="text-align:left">${escapeHtml(r.plate_position || '')}</td>` +
+            `<td style="text-align:right;color:${short ? '#ff7a3d' : 'var(--ink)'}">` +
+            `${r.char_height_px ?? '—'}</td></tr>`;
+        }).join('');
+      return;
+    }
+
+    // Colour-only run.
+    document.getElementById('plateHint').textContent =
+      `— ${block.plates_detected} detections · colour only`;
+    document.getElementById('plateNote').innerHTML =
+      '<div class="note">' + escapeHtml(block.ocr_note || '') + '</div>';
+    document.getElementById('plateTable').innerHTML =
+      '<tr><td style="color:var(--muted)">#</td>' +
+      '<td style="color:var(--muted);text-align:left">Class</td>' +
+      '<td style="color:var(--muted);text-align:left">Plate colour</td>' +
+      '<td style="color:var(--muted);text-align:right">Glyph px</td></tr>' +
+      rows.map(r =>
+        `<tr><td>${r.vehicle_no ?? ''}</td>` +
+        `<td style="text-align:left">${escapeHtml(r.vehicle_class || '')}</td>` +
+        `<td style="text-align:left"><span style="color:${PLATE_COLOR[r.plate_color] || COL.text}">●</span> ` +
+        `${escapeHtml(r.plate_color_display || r.plate_color || '')}</td>` +
+        `<td style="text-align:right">${r.char_px_best ?? '—'}</td></tr>`
+      ).join('');
   }
 
   // Where the class labels on THIS report came from. Previously hard-coded to

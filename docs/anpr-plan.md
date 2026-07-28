@@ -10,6 +10,62 @@ drives everything below, so it is established first with measurements.
 
 ---
 
+## 0. What was built — the cascade (2026-07-28)
+
+Sections 1–6 below are the measurement record that established the resolution
+limit. This section is what now ships: `pipeline/anpr.py`, run with `--anpr`.
+
+```
+frame --[COCO YOLO + tracker]--> vehicle --[stage 2]--> plate --[stage 3]--> characters
+                                                             \--> colour (no model)
+```
+
+Stage 1 needs no training. Stages 2 and 3 are separate models trained on
+**EALPR** (public Egyptian benchmark, ~2,000 annotated vehicles and plates):
+
+* `tools/ealpr_charmap.py` — EALPR's character labels are bare integers with no
+  legend anywhere in the dataset. This recovers it by cross-matching each
+  labelled box against the glyph crops, which are named with their character.
+  **100% agreement on all 26 classes across 1,923 plates.** The alphabet is 17
+  Arabic letters plus ١-٩; there is no ٠ on an Egyptian plate.
+* `tools/build_anpr_datasets.py` — builds both YOLO datasets, split by plate.
+* `tools/train_anpr.py` + `notebooks/train_all_colab.ipynb` — trains them.
+* `tools/eval_anpr.py` — measures all three levels.
+
+### Measured, 313 held-out vehicles
+
+| | result |
+|---|---|
+| stage 2, plate recall @IoU 0.5 | **93.3%** (median IoU 0.805) |
+| stage 3, on ground-truth crops | 89.4% exact · 98.9% characters |
+| **end to end** | **80.9% exact · 92.1% characters** |
+
+End-to-end is the honest number; stage 3 alone assumes a perfect plate crop.
+That run used the pretrained `models/eg_alpr.pt`, whose provenance is unknown
+and which may have trained on EALPR — re-measure once stage 3 is ours.
+
+### Two things the cascade gets right that a naive version does not
+
+**The plate is not always in the middle.** Across EALPR's 2,087 annotated
+vehicles the plate's centre-x spans **0.026 to 0.962** of vehicle width. Stage 2
+searches the whole vehicle crop and every CSV row reports where the plate
+actually was.
+
+**Letters and digits read in opposite directions.** Arabic letters run
+right-to-left; the number runs left-to-right. A single sort-by-x produces a
+plausible-looking string with the letters reversed — an error that survives
+review because the reviewer usually does not read Arabic. `anpr.assemble()`
+emits the Arabic form, a Latin transliteration and the raw visual order.
+
+### On this project's own footage it reads nothing, correctly
+
+`street_25s.mp4`: 111 vehicle crops searched, **59 plates located**, colour read
+for 3 of 4 counted vehicles, **0 character strings published** — every row
+attributed to a glyph height of 6.1–11.0 px against the 15 px floor. That is
+sections 1–6 confirmed end to end by an independent path.
+
+---
+
 ## 1. What the footage can support
 
 Three capabilities, three very different floors:

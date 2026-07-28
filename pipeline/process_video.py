@@ -75,6 +75,27 @@ def _draw_plates(frame, det: sv.Detections, plates: PlateReader):
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
 
 
+def _draw_anpr(frame, det: sv.Detections, anpr):
+    """Outline the plate the cascade located, in its resolved colour category.
+
+    Deliberately no character text on the video. At this scale the plate is a
+    few tens of pixels and a rendered string would cover the vehicle; worse,
+    Arabic needs a shaping-aware renderer that OpenCV does not have, so
+    cv2.putText draws it disconnected and left-to-right — a wrong plate number
+    burned into the deliverable. The characters belong in the CSV, where they
+    can be rendered properly and checked.
+    """
+    if det.tracker_id is None:
+        return
+    for tid in det.tracker_id:
+        box = anpr.box_of(int(tid))
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        color = PLATE_BGR.get(anpr.colour_of(int(tid)), PLATE_BGR["unknown"])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
+
+
 def _draw_counting_line(frame, counter: LineCounter):
     (x1, y1), (x2, y2) = counter.line_px()
     cv2.line(frame, (x1, y1), (x2, y2), ELSEWEDY_RED, 3, cv2.LINE_AA)
@@ -221,6 +242,20 @@ def process_video(
                           enhancer=enhancer)
               if cfg.plates else None)
 
+    # ANPR cascade: vehicle crop -> plate -> characters + colour. Independent of
+    # the `plates` stage above, and self-contained in the same way — missing
+    # weights are reported and every other analytic proceeds.
+    anpr = None
+    if cfg.anpr:
+        from .anpr import load_cascade
+        anpr = load_cascade(cfg.anpr_stage2_model, cfg.anpr_stage3_model)
+        if anpr.locator is None:
+            print("[anpr] no plate locator — the cascade cannot run. Train one "
+                  "with tools/train_anpr.py, or point ITS_ANPR_STAGE2 at "
+                  "models/plate_detect.pt.", flush=True)
+            anpr = None
+    anpr_seen: dict[int, int] = defaultdict(int)
+
     # Colour by TRACK, not by class. supervision's default is ColorLookup.CLASS,
     # and base YOLO flip-flops between car/truck/bus on the same vehicle from one
     # frame to the next, so a box visibly cycled through palette colours while the
@@ -275,6 +310,20 @@ def process_video(
                 # detection is wrong here.
                 if plates is not None:
                     plates.observe_frame(frame, det, imgsz=cfg.plate_imgsz)
+                # The ANPR cascade works the other way round on purpose: it
+                # searches INSIDE each vehicle's crop, so the plate's owner is
+                # known by construction and the detector's input resolution is
+                # spent on the vehicle rather than on the whole road. Sampled
+                # per track, like the crop classifier.
+                if anpr is not None:
+                    for i in range(len(det)):
+                        if int(det.class_id[i]) not in vehicle_ids:
+                            continue
+                        tid = int(det.tracker_id[i])
+                        n = anpr_seen[tid]
+                        anpr_seen[tid] = n + 1
+                        if n % max(cfg.anpr_every, 1) == 0:
+                            anpr.observe(frame, tid, det.xyxy[i])
             if det.tracker_id is not None:
                 seen_tracks.update(int(t) for t in det.tracker_id)
             counter.update(det)
@@ -309,6 +358,8 @@ def process_video(
                                        scheme))
             if plates is not None and cfg.draw_plates and len(det):
                 _draw_plates(frame, det, plates)
+            if anpr is not None and cfg.draw_plates and len(det):
+                _draw_anpr(frame, det, anpr)
             if cfg.draw_counting_line:
                 _draw_counting_line(frame, counter)
             _draw_hud(frame, counter, level, avg_speed, t_sec, cfg.calibrated,
@@ -506,6 +557,9 @@ def process_video(
         **({"plates": plates.summary(counter.vehicle_events, classifier,
                                      counter.lane_of, detector.display_id)}
            if plates is not None else {}),
+        **({"anpr": anpr.summary(counter.vehicle_events, classifier,
+                                 counter.lane_of, detector.display_id)}
+           if anpr is not None else {}),
         "timeseries": timeseries,
         "class_scheme": {c: n for c, (n, _) in MENTOR_CLASSES.items()},
         # Which signal actually produced the class labels on this run. The
@@ -577,6 +631,16 @@ def main():
     ap.add_argument("--vehicle-cls-every", type=int, default=None,
                     help="run the crop classifier on every Nth observation of "
                          "a track (default 5; 1 = every frame, slower)")
+    ap.add_argument("--anpr", action="store_true",
+                    help="enable the ANPR cascade: vehicle -> plate -> "
+                         "characters + colour (see pipeline/anpr.py)")
+    ap.add_argument("--anpr-stage2", default=None,
+                    help="plate-on-vehicle weights (default $ITS_ANPR_STAGE2)")
+    ap.add_argument("--anpr-stage3", default=None,
+                    help="character weights (default $ITS_ANPR_STAGE3)")
+    ap.add_argument("--anpr-every", type=int, default=None,
+                    help="run the cascade on every Nth observation of a track "
+                         "(default 3)")
     ap.add_argument("--plates", action="store_true",
                     help="enable the licence-plate stage (detection + colour)")
     ap.add_argument("--plate-model", default=None)
@@ -613,6 +677,16 @@ def main():
                              or cfg.vehicle_cls_model)
     if args.vehicle_cls_every:
         cfg.vehicle_cls_every = args.vehicle_cls_every
+    # ANPR cascade. Same env vars the web app reads — CLAUDE.md §4 records what
+    # it costs when the two entry points disagree about a setting.
+    if args.anpr or os.getenv("ITS_ANPR", "").lower() in ("1", "true", "yes"):
+        cfg.anpr = True
+    cfg.anpr_stage2_model = (args.anpr_stage2 or os.getenv("ITS_ANPR_STAGE2")
+                             or cfg.anpr_stage2_model)
+    cfg.anpr_stage3_model = (args.anpr_stage3 or os.getenv("ITS_ANPR_STAGE3")
+                             or cfg.anpr_stage3_model)
+    if args.anpr_every:
+        cfg.anpr_every = args.anpr_every
     if args.plate_model:
         cfg.plate_model = args.plate_model
     if args.plate_ocr_model:
