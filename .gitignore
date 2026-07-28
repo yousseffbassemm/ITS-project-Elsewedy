@@ -37,3 +37,6 @@ samples/*.mp4
 *_cls.zip
 # Machine-local Claude Code settings; .claude/launch.json IS shared.
 .claude/settings.local.json
+
+# Colab code bundle — a build artefact, regenerate with tools/pack_for_colab.py
+its_code_for_colab.zip
