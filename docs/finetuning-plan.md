@@ -1,5 +1,24 @@
 # Fine-Tuning Plan — Unlocking the Full 7-Class Taxonomy (C & V)
 
+> **Status (2026-07-28).** §1's class rulebook below is still the definition in
+> force — read it. The rest is superseded on two points, and the differences are
+> worth knowing:
+>
+> * **A classifier, not a detector.** Detection was never the weak part; YOLO
+>   finds the vehicles and the tracker holds them. The LABEL is what is wrong, so
+>   a second-stage classifier over the tracked crop targets it directly, trains
+>   on crops rather than redrawn boxes, and cannot cost the run its counts if it
+>   is bad. See `pipeline/classify.py` and `tools/train_vehicle_classes.py`.
+> * **Public surveillance data, not hand-collected frames.** §2 plans an
+>   in-domain annotation campaign. What shipped instead is **MIO-TCD** —
+>   519,164 crops from real traffic cameras, already labelled, carrying
+>   `work_van` and `pickup_truck` as first-class categories. Prepared by
+>   `tools/prep_vehicle_dataset.py`. The domain (surveillance crops, not press
+>   photography) matters more than the count; §5 of CLAUDE.md has the numbers.
+>
+> The measured accuracy table lives in CLAUDE.md §4 and is reproduced by
+> `python -m tools.eval_vehicle_cls`.
+
 **Goal:** train a detector that natively outputs the mentor's 7 classes so that
 **C (Light truck)** and **V (Van)** — which base COCO YOLO cannot separate from
 trucks/cars — are produced directly and reliably, alongside A, D, E, G.

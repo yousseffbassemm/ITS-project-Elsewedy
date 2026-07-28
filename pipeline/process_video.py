@@ -316,6 +316,8 @@ def process_video(
                 # spent on the vehicle rather than on the whole road. Sampled
                 # per track, like the crop classifier.
                 if anpr is not None:
+                    # Plate boxes are per-frame overlay state — see begin_frame.
+                    anpr.begin_frame()
                     for i in range(len(det)):
                         if int(det.class_id[i]) not in vehicle_ids:
                             continue

@@ -1361,6 +1361,21 @@ def test_plate_position_is_reported() -> None:
           c.resolve(2).position == "right")
 
 
+def test_cascade_plate_box_does_not_go_stale() -> None:
+    """A plate box must not survive into a frame it was not detected in.
+
+    The cascade only looks every Nth observation, so most frames legitimately
+    have no box. Holding the last one draws a plate rectangle detached from its
+    vehicle, drifting backwards down the road for the rest of the track's life.
+    pipeline/plates.py fixed this once; anpr.py reintroduced it.
+    """
+    c = ANPRCascade(None, None)
+    c._boxes[7] = (10, 20, 40, 30)
+    check("a box from this frame is drawn", c.box_of(7) == (10, 20, 40, 30))
+    c.begin_frame()
+    check("and is gone once the next frame starts", c.box_of(7) is None)
+
+
 def test_cascade_degrades_without_weights() -> None:
     """Missing ANPR weights must never cost the run its other analytics.
 
@@ -1470,6 +1485,7 @@ def main() -> int:
     test_blank_plate_is_attributed_to_the_right_cause()
     test_colour_needs_corroboration()
     test_plate_position_is_reported()
+    test_cascade_plate_box_does_not_go_stale()
     test_cascade_degrades_without_weights()
     print("congestion")
     test_congestion_needs_actual_traffic()

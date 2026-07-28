@@ -359,6 +359,21 @@ class ANPRCascade:
         self.vehicles_seen = 0
 
     # --- per frame ----------------------------------------------------------
+    def begin_frame(self) -> None:
+        """Drop last frame's plate boxes. Call once per frame, before observe().
+
+        Plate boxes are for DRAWING and are valid only in the frame they were
+        found in. Keeping them made the overlay draw a plate rectangle at the
+        position it was last seen for the rest of the vehicle's life — a box
+        detached from its vehicle, drifting backwards down the road. The cascade
+        is sampled every Nth observation, so "no box this frame" is the normal
+        case and drawing nothing is the honest answer.
+
+        pipeline/plates.py fixed this exact bug once already; this module
+        reintroduced it by keeping a plain dict.
+        """
+        self._boxes.clear()
+
     def observe(self, frame: np.ndarray, tid: int, xyxy) -> None:
         """One vehicle, one frame: locate the plate, read colour and characters."""
         if self.locator is None:
