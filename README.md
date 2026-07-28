@@ -90,13 +90,19 @@ the app loads it at startup. Variables already set in the shell take precedence.
 **A** Private car · **C** Light truck · **D** Heavy truck · **E** Bus ·
 **G** Motorcycle · **V** Van · **F** Unknown.
 
-Base COCO has four vehicle classes against these seven, and cannot express
-**C** or **V** at all — every van is a "car" and every pickup a "truck" to it.
-A second-stage classifier over each tracked crop supplies the missing classes;
-it trains on MIO-TCD, ~30k traffic-camera crops that carry `work_van` and
-`pickup_truck` as real labels. Where the classifier lands on C-or-D, the
-monocular frontal-area estimate decides which, because a pickup and a lorry look
-alike from behind and differ mainly in size.
+A second-stage classifier over each tracked crop assigns **all seven** of these
+labels, trained on ~30k traffic-camera crops from MIO-TCD with roughly equal
+weight per class (A/C/D/E/V 5,100 each · G 3,627 · F 1,489). Buses, motorcycles
+and heavy trucks are learned as directly as cars.
+
+**C** and **V** get singled out in the docs only because base COCO cannot
+express them *at all* — every van is a "car" to it and every pickup a "truck" —
+so they had no baseline to improve on. That says what was previously broken, not
+what the model covers.
+
+Where the classifier lands on C-or-D, the monocular frontal-area estimate
+decides which, because a pickup and a lorry look alike from behind and differ
+mainly in size.
 
 ```powershell
 $env:ITS_VEHICLE_CLS="models/vehicle_cls.pt"
